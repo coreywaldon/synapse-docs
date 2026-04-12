@@ -1,0 +1,104 @@
+---
+title: Gutter Navigation
+description: Clickable icons next to every Synapse call site — jump between producers, consumers, providers, and interceptors in one click.
+---
+
+import Broadcast from '../../../assets/navigator-icons/broadcast.svg';
+import Listen from '../../../assets/navigator-icons/listen.svg';
+import Trigger from '../../../assets/navigator-icons/trigger.svg';
+import React from '../../../assets/navigator-icons/react.svg';
+import Request from '../../../assets/navigator-icons/request.svg';
+import Provider from '../../../assets/navigator-icons/provider.svg';
+import Interceptor from '../../../assets/navigator-icons/interceptor.svg';
+
+The central problem Navigator solves is the one the bus creates: a
+producer and its consumers never reference each other directly in the
+source. <Trigger /> `Trigger(LoginRequested)` in an auth coordinator and
+<React /> `ReactTo<LoginRequested> { … }` in a navigation coordinator are joined
+only by the type they share, and the IDE's standard Ctrl+Click lands on
+the class declaration, not on the other call site.
+
+Gutter icons close that gap. Every SynapseLib call site gets a clickable
+marker in the editor gutter; clicking it opens a popup listing every
+connected counterpart (plus any interceptors affecting the call), and
+each entry in the popup jumps directly to its source.
+
+## The icons
+
+Icons appear at every producer, consumer, and provider call site on
+every channel. Each icon's popup lists the counterparts that share its
+type argument. The same glyphs you see in the editor gutter are reused
+in the tool window and in Mermaid exports, so a quick visual scan tells
+you which channel you're looking at without reading the label.
+
+| Channel      | Producer                              | Consumer / handler                  |
+|--------------|---------------------------------------|-------------------------------------|
+| **State**    | <Broadcast /> `Broadcast<T>`          | <Listen /> `ListenFor<T>`           |
+| **Reaction** | <Trigger /> `Trigger<A>`              | <React /> `ReactTo<A>`              |
+| **Request**  | <Request /> `Request<Impulse, N>`     | <Provider /> `@SynapseProvider` class |
+
+A seventh glyph — <Interceptor /> — marks every <Interceptor /> `Intercept<T>(…)`
+registration, regardless of which channel it's bound to.
+
+Clicking a <Broadcast /> `Broadcast<UserLoggedIn>` icon shows every <Listen /> `ListenFor<UserLoggedIn>`
+in the project — whether it lives in a coordinator, a Node, or a
+provider. Clicking a <React /> `ReactTo<LoginRequested>` shows every <Trigger /> `Trigger` that
+fires the impulse. Clicking a <Request /> `Request<FetchProduct, Product>` jumps
+straight to the one <Provider /> `@SynapseProvider` class that handles it.
+
+Supertype matching follows the same rules as the bus: a consumer
+registered for a marker interface shows up on every subtype's gutter
+popup, and vice versa. This is how the `TokenBearer` and
+`AnalyticsEvent` patterns stay navigable — one consumer, many concrete
+producers, all cross-linked automatically.
+
+## Interceptor markers
+
+<Interceptor /> `Intercept<T>(…)` call sites get their own gutter icon. The popup shows
+which producer and consumer call sites the interceptor is visible to,
+tagged with:
+
+- **Direction** — whether the interceptor sits at the upstream or
+  downstream point of its channel.
+- **Priority** — the `Int` priority the interceptor was registered with,
+  so you can see at a glance whether it's before or after other
+  interceptors on the same point.
+
+For a <Broadcast /> `Broadcast<T>` or <Trigger /> `Trigger<T>` site, the producer's gutter popup
+also lists every interceptor whose type matches — including supertype
+matches — so you can see every piece of middleware that will see the
+value without jumping tabs.
+
+## Type declaration markers
+
+A separate marker appears next to the declaration of any data class,
+sealed hierarchy, or interface that's used as a Synapse channel type. It
+summarizes every hook on that type in a single popup:
+
+```
+BuyProduct            (Impulse)
+  Triggers            3 (CartScreen, ProductRow, QuickBuySheet)
+  ReactTo             1 (CartCoordinator)
+  Interceptors        2 (TokenBearer upstream, Analytics upstream)
+```
+
+This is the view you want when you're deciding whether to rename an
+impulse, change its fields, or break it into variants — you see every
+site that participates in the type's traffic without having to grep.
+
+## Popup navigation
+
+All the popups share the same shape: a grouped list of targets, each
+one a clickable entry that takes you to the source location on click.
+The groupings — "Listeners", "Reactors", "Providers", "Interceptors
+(upstream)", "Interceptors (downstream)" — are consistent across every
+icon, so the visual scan becomes routine very quickly.
+
+When a call has *no* counterparts, the gutter icon still appears but
+renders in a muted style and its popup shows the unconnected status —
+the same condition the inspection surfaces as a warning, covered on the
+[Inspections](/navigator/inspections/) page.
+
+## Next
+
+- [Tool Window](/navigator/tool-window/) — the project-wide topology view

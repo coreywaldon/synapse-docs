@@ -1,0 +1,184 @@
+---
+title: Installation
+description: Add Synapse Arch to your Kotlin/Compose project.
+---
+
+import Broadcast from '../../../assets/navigator-icons/broadcast.svg';
+import Listen from '../../../assets/navigator-icons/listen.svg';
+import Trigger from '../../../assets/navigator-icons/trigger.svg';
+import React from '../../../assets/navigator-icons/react.svg';
+import Request from '../../../assets/navigator-icons/request.svg';
+import Provider from '../../../assets/navigator-icons/provider.svg';
+import Interceptor from '../../../assets/navigator-icons/interceptor.svg';
+
+Synapse Arch is published to Maven Central. At minimum you need the `arch` and
+`core` dependencies and the KSP plugin for provider code generation. You will
+also wire a `DefaultSwitchBoard` through your DI container — that's the concrete
+bus implementation the rest of arch resolves against.
+
+## Prerequisites
+
+- Kotlin 2.2.21 or later
+- KSP plugin (`com.google.devtools.ksp`)
+- A DI container — **Hilt** or **Koin**
+
+## Single-module project
+
+Add Synapse Arch, Core, and the KSP plugin to your module:
+
+```kotlin
+// app/build.gradle.kts
+plugins {
+    id("com.google.devtools.ksp")
+}
+
+dependencies {
+    implementation("com.synapselib:arch:1.0.10")
+    implementation("com.synapselib:core:1.0.10")
+    ksp("com.synapselib:arch:1.0.10")
+}
+
+ksp {
+    arg("synapse.moduleName", "App")
+}
+```
+
+`core` is required because arch's public types (`Node`, `SwitchBoard`,
+`Coordinator`, <Provider /> `Provider`) use reactive primitives from core.
+
+The `synapse.moduleName` argument is a unique name per Gradle module. KSP uses
+it to scope the generated provider registry. Use `"App"` for a single-module
+project, or a distinctive name per feature module in a multi-module setup.
+
+## Multi-module project (Hilt)
+
+For multi-module Hilt projects, add the `arch-hilt` aggregator to the **app
+module only**:
+
+```kotlin
+// app/build.gradle.kts
+dependencies {
+    implementation("com.synapselib:arch-hilt:1.0.10")
+}
+```
+
+Each **feature module** gets `arch`, `core`, and KSP:
+
+```kotlin
+// feature-xyz/build.gradle.kts
+plugins {
+    id("com.google.devtools.ksp")
+}
+
+dependencies {
+    implementation("com.synapselib:arch:1.0.10")
+    implementation("com.synapselib:core:1.0.10")
+    ksp("com.synapselib:arch:1.0.10")
+}
+
+ksp {
+    arg("synapse.moduleName", "FeatureXyz") // must be unique per module
+}
+```
+
+That's it. No manual registry wiring — providers are discovered automatically
+across all modules and merged at build time.
+
+:::tip[Why the aggregator exists]
+If multiple modules each set up providers, Hilt would otherwise see two
+<Provider /> `ProviderRegistry` bindings for the same type and fail. `arch-hilt` consumes a
+`Set<ProviderRegistryContribution>` from every module and merges them into a
+single registry.
+:::
+
+## Wiring the SwitchBoard
+
+`DefaultSwitchBoard` is the concrete implementation of the `SwitchBoard`
+interface. It takes:
+
+- A `CoroutineScope` for long-lived bus work
+- A <Provider /> `ProviderRegistry` (KSP-generated, merged by `arch-hilt` for multi-module Hilt)
+- A `CoroutineContext` for internal workers (defaults to `Dispatchers.IO`)
+- A stop-timeout and a replay-expiration in milliseconds (both default to `3000`)
+
+The scope, worker context, and two timeouts are looked up via qualifiers
+(`@SwitchBoardScope`, `@SwitchBoardWorkerContext`, `@SwitchBoardStopTimeout`,
+`@SwitchBoardReplayExpiration`) so you can swap them in tests.
+
+### Hilt
+
+```kotlin
+// app/src/main/.../di/SwitchBoardModule.kt
+@InstallIn(SingletonComponent::class)
+@Module
+object SwitchBoardModule {
+
+    @Provides @SwitchBoardStopTimeout
+    fun provideStopTimeoutMillis(): Long = 3_000
+
+    @Provides @SwitchBoardReplayExpiration
+    fun provideReplayExpirationMillis(): Long = 3_000
+
+    @Provides @SwitchBoardWorkerContext
+    fun provideWorkerContext(): CoroutineContext = Dispatchers.IO
+
+    @Provides @SwitchBoardScope
+    fun provideApplicationScope(): CoroutineScope =
+        CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    @Provides @Singleton
+    fun provideSwitchBoard(impl: DefaultSwitchBoard): SwitchBoard = impl
+}
+```
+
+`DefaultSwitchBoard` has an `@Inject` constructor, so Hilt builds it
+automatically once the four qualified bindings above exist. The last
+`@Provides` exposes it as `SwitchBoard` for injection points that take the
+interface.
+
+### Koin
+
+Koin users don't need `arch-hilt` — KSP generates a
+`synapseProviderModule_{ModuleName}` per Gradle module that you list at
+`startKoin`. You still need to construct `DefaultSwitchBoard` yourself:
+
+```kotlin
+val switchBoardModule = module {
+    single<SwitchBoard> {
+        DefaultSwitchBoard(
+            scope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
+            providerRegistry = get(),
+            workerContext = Dispatchers.IO,
+            stopTimeoutMillis = 3_000,
+            replayExpirationMillis = 3_000,
+        )
+    }
+}
+
+startKoin {
+    modules(
+        switchBoardModule,
+        synapseProviderModule_app, // KSP-generated, one per Gradle module
+    )
+}
+```
+
+The generated provider module contributes a `single<ProviderRegistry>`, which
+Koin resolves into the `get()` above.
+
+## IDE plugin (optional)
+
+Synapse Navigator is an IntelliJ / Android Studio plugin that makes bus
+traffic visible in the editor — clickable gutter icons between producers
+and consumers, a project-wide topology tool window, and an inspection
+that catches unconnected channels before runtime. It is distributed
+separately from the Gradle artifacts and installed from a built zip.
+
+See [Navigator — Introduction](/navigator/introduction/) for build and
+install instructions. The plugin supports IntelliJ IDEA 2024.2 – 2025.3
+and requires the bundled Kotlin plugin.
+
+## Next
+
+Continue to the [Quick Start](/getting-started/quick-start/) to build
+your first screen.

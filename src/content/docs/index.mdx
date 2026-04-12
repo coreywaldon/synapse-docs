@@ -1,0 +1,76 @@
+---
+title: Synapse
+description: Architecture framework for Kotlin/Compose that eliminates the coordination problem.
+template: splash
+hero:
+  tagline: Architecture framework for Kotlin/Compose that eliminates the coordination problem.
+  actions:
+    - text: Get Started
+      link: /getting-started/introduction/
+      icon: right-arrow
+    - text: View on GitHub
+      link: https://github.com/coreywaldon/synapse
+      icon: external
+      variant: minimal
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+## What you get
+
+<CardGrid>
+	<Card title="Zero coupling between features" icon="puzzle">
+		Components share only impulse types. Adding Feature B never requires
+		modifying Feature A.
+	</Card>
+	<Card title="Cross-cutting concerns, first-class" icon="setting">
+		Auth, analytics, and session management are interceptors — not bolted onto
+		a repository layer.
+	</Card>
+	<Card title="Real-bus testing, no mocks" icon="approve-check">
+		Tests run through the actual SwitchBoard with interceptor-based capture.
+	</Card>
+	<Card title="Compose-native" icon="seti:kotlin">
+		`CreateContext` and `Node` replace the ViewModel entirely — no ceremony.
+	</Card>
+	<Card title="KSP-wired DI" icon="rocket">
+		`@SynapseProvider` plus Hilt or Koin. Multi-module out of the box.
+	</Card>
+	<Card title="Benchmarked" icon="bars">
+		~200 ns per SwitchBoard op, ~20 µs per Node in Compose composition, linear
+		scaling at every layer.
+	</Card>
+</CardGrid>
+
+## How it works
+
+Every component in a Synapse application is an isolated state machine with typed
+inputs and outputs. Components never reference each other — they communicate
+exclusively through a central **SwitchBoard** that routes **state**, **reactions**,
+and **data requests** with a composable interceptor pipeline at every stage.
+
+The coupling between any two components is zero beyond the impulse types they
+share. This gives you a property most architectures can't: **compositional
+correctness**. If Component A works through the SwitchBoard and Component B works
+through the SwitchBoard, then A + B works — because the bus is real, never mocked,
+and the type system enforces the contract.
+
+There are no ViewModels. **Compose** screens use the `Node` / `CreateContext` DSL.
+**Non-Compose** contexts use `Coordinator`. Data fetching is handled by
+**Providers** wired automatically via KSP through Hilt or Koin.
+
+## Also in the family
+
+<CardGrid>
+	<Card title="Synapse Core" icon="seti:kotlin">
+		A standalone utility library of reactive operators for Kotlin `Flow` —
+		`gate`, `squash`, `pace`, `combo`, `chunk`, `shutter`, and logic gates on
+		`StateFlow<Boolean>`. Usable on its own, no Arch required.
+	</Card>
+	<Card title="Synapse Navigator" icon="magnifier">
+		An IntelliJ / Android Studio plugin that makes the bus legible in the
+		editor — gutter icons between producers and consumers, a project-wide
+		topology tool window, inlay hints, and an inspection that catches
+		unconnected channels. [Read more](/navigator/introduction/).
+	</Card>
+</CardGrid>

@@ -1,0 +1,326 @@
+---
+title: Testing
+description: Writing coordinator, Node, and Compose screen tests with the arch-test SynapseTestRule — and what it's saving you from.
+---
+
+import Broadcast from '../../../assets/navigator-icons/broadcast.svg';
+import Listen from '../../../assets/navigator-icons/listen.svg';
+import Trigger from '../../../assets/navigator-icons/trigger.svg';
+import React from '../../../assets/navigator-icons/react.svg';
+import Request from '../../../assets/navigator-icons/request.svg';
+import Provider from '../../../assets/navigator-icons/provider.svg';
+import Interceptor from '../../../assets/navigator-icons/interceptor.svg';
+
+Synapse tests are integration tests without the integration tax. A
+`SynapseTestRule` stands up a real `SwitchBoard` on an
+`UnconfinedTestDispatcher`, lets you stub providers inline, and gives you
+interceptor-backed capture helpers for assertions. The production bus,
+production coordinators, production interceptors — driven from the test
+instead of the UI.
+
+```kotlin
+testImplementation("com.synapselib:arch-test:1.0.10")
+```
+
+## The rule
+
+Declare `SynapseTestRule` as a JUnit 4 `@get:Rule`. The constructor takes
+an optional DSL block for provider stubs:
+
+```kotlin
+@get:Rule
+val synapse = SynapseTestRule {
+    provide<AuthToken, FetchCachedToken> { null }
+}
+```
+
+That single line replaces the dispatcher setup, `SwitchBoard` construction,
+<Provider /> `ProviderRegistry.Builder` dance, `LifecycleOwner` stub, interceptor
+cleanup, and `Dispatchers.resetMain` teardown you'd otherwise write by
+hand. The rule exposes three properties you actually care about:
+
+| Property          | Type                       | What it's for                                     |
+|-------------------|----------------------------|---------------------------------------------------|
+| `switchBoard`     | `DefaultSwitchBoard`       | Hand to coordinators and `LocalSwitchBoard`.      |
+| `testDispatcher`  | `UnconfinedTestDispatcher` | Drives all coroutines in the test.                |
+| `lifecycleOwner`  | `LifecycleOwner`           | Already in `RESUMED` — pass to coordinators.      |
+
+## A coordinator test end-to-end
+
+```kotlin
+@RunWith(RobolectricTestRunner::class)
+class AuthCoordinatorTest {
+
+    @get:Rule
+    val synapse = SynapseTestRule {
+        provide<AuthToken, FetchCachedToken> { null } // no cached token
+    }
+
+    private lateinit var authApi: TestAuthApi
+    private lateinit var coordinator: AuthCoordinator
+
+    @Before
+    fun setup() {
+        authApi = TestAuthApi()
+        coordinator = AuthCoordinator(authApi, synapse.lifecycleOwner)
+        coordinator.initialize(synapse.switchBoard)
+    }
+
+    @Test
+    fun loginBroadcastsAuthenticatedSession() = synapse.runTest {
+        val session = synapse.onState<SessionState>()
+
+        authApi.register("user@test.com", "password123", "Test User")
+        synapse.Trigger(LoginRequested("user@test.com", "password123"))
+
+        val authenticated = session.assertCaptured() as SessionState.Authenticated
+        assertEquals("user@test.com", authenticated.user.email)
+    }
+
+    @Test
+    fun loginWithBadPasswordTriggersAuthError() = synapse.runTest {
+        val authError = synapse.onImpulse<AuthError>()
+
+        authApi.register("user@test.com", "password123", "Test User")
+        synapse.Trigger(LoginRequested("user@test.com", "wrong"))
+
+        assertTrue(authError.assertCaptured().message.contains("Invalid"))
+    }
+}
+```
+
+The shape of every test is the same: install a capture, fire an impulse,
+assert on the capture. The capture is a real upstream interceptor — it
+sees the value synchronously as it enters the channel, so there's no
+`advanceUntilIdle`, no `turbine`, no `delay(100)` sprinkled between steps.
+
+`synapse.runTest { }` is a thin wrapper around
+`kotlinx.coroutines.test.runTest` that uses the rule's dispatcher.
+`TestAuthApi` is a hand-written in-memory fake for the API — the bus is
+real, but the network edge still needs a stub like any other test.
+
+## A Compose screen test end-to-end
+
+For Compose tests you add `createComposeRule()` as a second rule and hand
+the rule's switchboard to the composition through `LocalSwitchBoard`:
+
+```kotlin
+@RunWith(RobolectricTestRunner::class)
+class CheckoutScreenTest {
+
+    @get:Rule
+    val synapse = SynapseTestRule {
+        provide<List<Address>, FetchAddresses> { testAddresses }
+    }
+
+    @get:Rule
+    val composeTestRule = createComposeRule()
+
+    @Test
+    fun placeOrderTriggersCheckoutRequested() = synapse.runTest {
+        val checkout = synapse.onImpulse<CheckoutRequested>()
+
+        composeTestRule.setContent {
+            CompositionLocalProvider(LocalSwitchBoard provides synapse.switchBoard) {
+                CreateContext(appContext) { CheckoutScreen() }
+            }
+        }
+        composeTestRule.waitForIdle()
+
+        composeTestRule.onNodeWithText("Place Order").performScrollTo().performClick()
+        composeTestRule.waitForIdle()
+
+        assertEquals("addr-1", checkout.assertCaptured().addressId)
+    }
+}
+```
+
+Notice what isn't here: no ViewModel, no navigation mock, no
+`composeTestRule.runOnIdle { viewModel.something() }`. The screen reaches
+for data through <Request /> `Request(FetchAddresses)` and the test stubbed
+`FetchAddresses`; the button reaches for work through
+<Trigger /> `Trigger(CheckoutRequested(...))` and the test captures it through an
+interceptor. The Node doesn't know it's under test.
+
+## Capture helpers
+
+Capture helpers install upstream interceptors on the state or reaction
+channel. Because they run upstream — at `priority = Int.MAX_VALUE`, after
+every production interceptor — they see the final, fully-processed value
+(token injection, normalization, etc.) exactly as a real consumer would.
+
+| Helper                   | Returns          | Holds                       |
+|--------------------------|------------------|-----------------------------|
+| `onImpulse<T>()`          | `Capture<T>`     | Most recent reaction of `T` |
+| `onState<T>()`            | `Capture<T>`     | Most recent state of `T`    |
+| `onAllImpulses<T>()`      | `CaptureAll<T>`  | Every reaction of `T`       |
+| `onAllStates<T>()`        | `CaptureAll<T>`  | Every state of `T`          |
+
+`Capture<T>` exposes `assertCaptured(): T`, `assertNotCaptured()`, and a
+nullable `value`. `CaptureAll<T>` adds `assertCount(n)`, `values`,
+`count`, and `latest`.
+
+```kotlin
+val toasts = synapse.onAllImpulses<ShowToast>()
+synapse.Trigger(ShowToast("Added to cart"))
+synapse.Trigger(ShowToast("Removed from cart"))
+toasts.assertCount(2)
+assertEquals("Added to cart", toasts.values[0].message)
+```
+
+**Install captures before the action under test.** An interceptor only
+sees values that flow through it after registration — a capture declared
+after the <Trigger /> `Trigger` call catches nothing.
+
+**Captures see upstream values, not downstream ones.** The helpers hook
+in at `REACTION_UPSTREAM` / `STATE_UPSTREAM`, so anything installed at a
+downstream point is deliberately invisible to them. That's not a gap —
+it's the only correct choice. A downstream interceptor fires once *per
+collector*, as a value is about to be delivered to a specific
+<React /> `ReactTo`/<Listen /> `ListenFor`, so "what does downstream produce" isn't a
+well-defined question without also naming the consumer. If you need to
+assert on a downstream transform, build the real consumer in the test
+(a `synapse.Coordinator { ReactTo<Foo> { ... } }` with the downstream
+interceptor installed inside it) and capture what it actually observes.
+
+**Negative assertions are first-class.** `assertNotCaptured()` is the
+Synapse equivalent of `verify(never())`. A test that says "logging out
+should not trigger `SessionExpired`" is one line:
+
+```kotlin
+val expired = synapse.onImpulse<SessionExpired>()
+synapse.Trigger(LogoutRequested())
+expired.assertNotCaptured()
+```
+
+## Stubbing providers
+
+Every `DataImpulse` the system under test requests needs a provider. The
+rule's DSL gives you two factories:
+
+```kotlin
+@get:Rule
+val synapse = SynapseTestRule {
+    // One-shot value — wrapped in a single-emission flow
+    provide<List<Address>, FetchAddresses> { testAddresses }
+
+    // Empty flow — useful for "the cache has nothing"
+    provide<AuthToken, FetchCachedToken> { null }
+
+    // Streaming / multi-emission
+    provideFlow<List<Product>, FetchProducts> { impulse ->
+        flow {
+            emit(cachedProducts)
+            delay(100)
+            emit(freshProducts)
+        }
+    }
+}
+```
+
+You only need to register the impulses the test actually exercises. A
+`DataImpulse` fired with no registered provider surfaces
+`NoProviderException` on the returned flow — which is the right failure
+mode for a test, since you want to notice the omission.
+
+## Driving the system from the test
+
+Three entry points on the rule let you feed values into the bus:
+
+```kotlin
+synapse.Trigger(LoginRequested("user@test.com", "password"))
+synapse.Broadcast(SessionState.LoggedOut)
+
+synapse.Coordinator {
+    ReactTo<LoginRequested> {
+        launch { Trigger(AuthSuccess()) }
+    }
+}
+```
+
+`synapse.Coordinator { }` is the inline coordinator helper — it gives you
+a real `CoordinatorScope` attached to the rule's switchboard, and it's
+disposed on teardown with the rest of the coordinators. Useful when the
+test wants to stand up a small reactor alongside the one under test
+without defining a throwaway class.
+
+## Pitfalls you avoid by using the rule
+
+You *can* build this setup by hand. The reason the rule exists is that
+every piece of it has a sharp edge, and the edges compound.
+
+**Dispatcher leakage.** Forgetting `Dispatchers.resetMain()` in `@After`
+leaves a test dispatcher installed for the next test in the same JVM.
+The next test passes or fails based on ordering instead of behavior.
+`SynapseTestRule` resets the main dispatcher unconditionally in its
+`finally` block.
+
+**Unregistered interceptors.** A hand-rolled `Capture<T>` helper that
+installs an interceptor and forgets to track the `Registration` will
+survive into the next test. The next test's assertions start seeing
+values from a dead interceptor on a discarded `SwitchBoard`, which is
+somewhere between "confusing failure" and "never fails because the
+interceptor is attached to the old board." The rule owns every
+interceptor it hands out and unregisters them in teardown.
+
+**Provider registry boilerplate.** A hand-built <Provider /> `ProviderRegistry.Builder`
+takes a `needClass: Class<List<Address>>` — which doesn't exist, because
+`List::class.java` is `Class<List<*>>`. You end up writing
+`List::class.java as Class<List<Address>>` with an unchecked-cast
+suppression, for every list-returning provider, in every test file. The
+rule's `provide<Need, Impulse> { }` erases the cast behind reified type
+parameters.
+
+**Lifecycle stubs.** A coordinator needs a `LifecycleOwner` in `RESUMED`.
+By hand that's an `object : LifecycleOwner` with a `LifecycleRegistry`
+property and a `currentState = Lifecycle.State.RESUMED` assignment in
+`@Before`. Miss the `RESUMED` step and the coordinator silently never
+activates — the test hangs waiting for an impulse that will never be
+observed. `synapse.lifecycleOwner` arrives pre-resumed.
+
+**Coordinator disposal order.** A coordinator disposed after
+`Dispatchers.resetMain()` races with coroutines that are already
+scheduled on the swapped-out dispatcher and throws
+`IllegalStateException: Module with the Main dispatcher had failed to
+initialize`. By hand you have to remember the order — dispose first,
+reset second. The rule does both in the right order.
+
+**Capture helpers drifting per-file.** When `Capture<T>` is copy-pasted
+into each test class, every file slowly grows a slightly different
+version: one starts tracking a list, one adds a timeout, one forgets to
+snapshot the value and has a race on the field read. Centralizing it in
+the rule means a single implementation, tested once.
+
+**Async collection on a `SharedFlow`.** The natural hand-rolled
+alternative to an upstream interceptor is collecting the `SharedFlow`
+returned by <Listen /> `ListenFor`/<React /> `ReactTo` in a `launch { ... }`, then asserting
+on a captured variable. The problem is that the collect starts late —
+after the action under test — so fast paths miss their value entirely
+unless you're careful about eager sharing, buffer sizes, and replay.
+Upstream interceptors sidestep the whole category of bug by running
+synchronously as the value enters the channel.
+
+The short version: the rule replaces roughly forty lines of setup per
+test file, and every one of those lines has a failure mode that's
+annoying to diagnose. Use the rule.
+
+## Why the real bus beats mocks
+
+The test assertion surface is deliberately the same surface production
+code uses. A capture on `onImpulse<CheckoutRequested>()` is an
+interceptor at `REACTION_UPSTREAM` — the exact mechanism an analytics
+interceptor uses in production. A `provide<List<Address>, FetchAddresses>`
+stub is a <Provider /> `Provider<FetchAddresses, List<Address>>` — the exact shape of
+the production provider. Nothing in the test setup knows it's a test.
+
+That gives you two things for free. First, cross-cutting concerns — token
+injection, correlation IDs, analytics — are tested once in the coordinator
+that owns them, and every other test inherits them automatically through
+the same interceptor chain. Second, there's no mock layer that can drift
+out of sync with production. A renamed field on an impulse breaks the
+test at the same point it breaks the real call site, because they go
+through the same dispatch.
+
+## Next
+
+- [Hilt Integration](/arch/hilt/) — wiring the switchboard, registry, and coordinators in a real app

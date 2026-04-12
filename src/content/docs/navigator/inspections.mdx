@@ -1,0 +1,106 @@
+---
+title: Inspections
+description: The unconnected-channel inspection and its Generate Counterpart quick fix — catching half-wired bus traffic before it hits runtime.
+---
+
+import Broadcast from '../../../assets/navigator-icons/broadcast.svg';
+import Listen from '../../../assets/navigator-icons/listen.svg';
+import Trigger from '../../../assets/navigator-icons/trigger.svg';
+import React from '../../../assets/navigator-icons/react.svg';
+import Request from '../../../assets/navigator-icons/request.svg';
+import Provider from '../../../assets/navigator-icons/provider.svg';
+import Interceptor from '../../../assets/navigator-icons/interceptor.svg';
+
+The bus will happily run with a <Broadcast /> `Broadcast` that nobody listens to or a
+<React /> `ReactTo` that no one ever triggers — structurally, those calls are just
+coroutines that never collect a value. That flexibility is load-bearing
+most of the time (a producer doesn't care whether it has zero or ten
+consumers), but it means a typo, a deleted listener, or a missing
+provider can silently break a feature without any static error.
+
+Navigator adds one inspection, enabled by default at *warning* level,
+that catches half-wired channels at edit time instead of at runtime.
+
+## Unconnected SynapseLib channel
+
+The inspection flags six situations — all of them "one half of a
+channel with nothing on the other half":
+
+| Flag                                        | What's missing                       |
+|---------------------------------------------|--------------------------------------|
+| <Broadcast /> `Broadcast<T>` with no listeners            | A <Listen /> `ListenFor<T>` somewhere.          |
+| <Listen /> `ListenFor<T>` with no sources              | A <Broadcast /> `Broadcast<T>` somewhere.          |
+| <Trigger /> `Trigger<A>` with no reactors               | A <React /> `ReactTo<A>` somewhere.            |
+| <React /> `ReactTo<A>` with no sources                | A <Trigger /> `Trigger<A>` somewhere.            |
+| <Request /> `Request<I, N>` with no provider            | A <Provider /> `@SynapseProvider` class for `I`.  |
+| <Provider /> `@SynapseProvider` with no callers          | A <Request /> `Request<I, N>` somewhere.         |
+
+Matching follows the same rules as the runtime bus — an interface or
+abstract type on either side counts as connected if *any* subtype
+satisfies the other half. A <React /> `ReactTo<AnalyticsEvent>` marker-interface
+consumer is considered connected as long as at least one concrete
+`AnalyticsEvent` subclass is actually being triggered somewhere, even
+if no call site uses the marker interface directly.
+
+The warning surfaces in three places:
+
+- **In the editor gutter** — the gutter icon at the call site renders
+  in the warning style instead of the normal style.
+- **In the tool window** — both Type Map and Flow Map sort
+  unconnected entries to the top so they're the first thing you see.
+- **In the Problems panel** — alongside other inspections, scoped to
+  the module.
+
+Because the check happens against the project-wide cache rather than
+just the current file, it catches "producer added, consumer forgotten"
+and "consumer added, producer forgotten" equally, which the IDE's
+built-in reference-following can't do on its own.
+
+## Tuning the inspection
+
+The inspection is configurable under **Settings > Editor > Inspections
+> Kotlin > Synapse Navigator > Unconnected SynapseLib channel**. You can
+disable it per-scope (for example, on a `scratches` module) or
+downgrade the severity from *warning* to *weak warning* if you want
+the gutter to stay clean and only surface the problem in the Problems
+panel.
+
+If the inspection is flagging something you know to be correct —
+usually because a call site uses a domain-specific wrapper function
+that Navigator isn't recognizing — the fix is upstream: add the
+wrapper's name under **Settings > Tools > SynapseLib** as an alias for
+the base function, and both the inspection and the gutter will start
+picking up the wrapped call.
+
+## Generate Counterpart quick fix
+
+Every unconnected-channel warning ships with a **Generate Counterpart**
+quick fix (Alt+Enter). Invoking it inserts a TODO stub for the missing
+half of the channel:
+
+- On an unconnected <Broadcast /> `Broadcast<SessionState>`, it inserts a
+  <Listen /> `ListenFor<SessionState> { /* TODO */ }` stub at an appropriate
+  insertion point.
+- On an unconnected <Trigger /> `Trigger<AddItem>`, it inserts a
+  <React /> `ReactTo<AddItem> { impulse -> /* TODO */ }` stub.
+- On an unconnected <Request /> `Request<FetchFoo, Foo>`, it inserts a
+  <Provider /> `@SynapseProvider` class stub with the right superclass parameters
+  and a `produce` override whose body is `TODO()`.
+- On a <Provider /> `@SynapseProvider` with no callers, it inserts a
+  <Request /> `Request<FetchFoo, Foo>()` stub at the cursor.
+
+The stub is not meant to be the finished wiring — it's meant to be the
+*shape* of the missing half, placed somewhere the compiler will accept
+it, so you can immediately start filling in the real body. Navigator
+picks a reasonable insertion point (the current file for local
+counterparts, a nearby coordinator for cross-file ones), but the stub
+always lands as a normal edit you can undo or relocate.
+
+The pragmatic workflow is: type the half you're thinking about,
+accept the inspection's warning as a reminder that the other half
+doesn't exist yet, hit Alt+Enter, fill in the TODO, and move on. The
+inspection clears on the next incremental rescan.
+
+## Next
+
+- Back to [Arch](/arch/channels) — the architecture Navigator navigates.

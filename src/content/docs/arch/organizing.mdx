@@ -1,0 +1,274 @@
+---
+title: Organizing Impulses & State
+description: How to name, group, and compose impulse types and state objects so a growing app stays legible.
+---
+
+import Broadcast from '../../../assets/navigator-icons/broadcast.svg';
+import Listen from '../../../assets/navigator-icons/listen.svg';
+import Trigger from '../../../assets/navigator-icons/trigger.svg';
+import React from '../../../assets/navigator-icons/react.svg';
+import Request from '../../../assets/navigator-icons/request.svg';
+import Provider from '../../../assets/navigator-icons/provider.svg';
+import Interceptor from '../../../assets/navigator-icons/interceptor.svg';
+
+Impulse types are the vocabulary of a Synapse app. Every button click, every
+fetch, every cross-screen handshake is a named type that shows up in imports,
+in grep results, and in the type signatures of every coordinator and provider
+that handles it. A small app can get away with throwing them all in one file;
+a growing one needs a layout that answers three questions at a glance: *what
+channel does this travel on*, *which domain owns it*, and *what does its name
+actually say about intent*.
+
+## Parent-object namespacing
+
+The simplest way to keep impulse names short *and* unambiguous is to group
+them under parent `object` declarations. Each object is a namespace — its
+inner classes get to be called whatever the domain naturally calls them
+(`AddItem`, `RemoveItem`, `Login`, `Logout`) without colliding with impulses
+from other parts of the app:
+
+```kotlin
+// Reaction-channel impulses grouped by domain
+object Cart {
+    data class AddItem(val productId: String, val quantity: Int = 1) : Impulse()
+    data class RemoveItem(val productId: String) : Impulse()
+    data class UpdateQuantity(val productId: String, val quantity: Int) : Impulse()
+    data class Checkout(val addressId: String) : Impulse()
+    class OrderPlaced : Impulse()
+}
+
+object Auth {
+    data class Login(val email: String, val password: String) : Impulse()
+    class Logout : Impulse()
+    data class Error(val message: String) : Impulse()
+    class SessionExpired : Impulse()
+}
+
+// Request-channel impulses grouped by intent
+object Fetch {
+    data class Products(val filter: ProductFilter) : DataImpulse<List<Product>>()
+    data class ProductDetail(val productId: String) : DataImpulse<Product>()
+    data class UserProfile(val userId: String) : DataImpulse<User>()
+}
+
+object Observe {
+    data class Cart(val userId: String) : DataImpulse<List<CartItemWithProduct>>()
+    data class Favorites(val userId: String) : DataImpulse<List<Product>>()
+    data class Orders(val userId: String) : DataImpulse<List<Order>>()
+}
+```
+
+Call sites read like prose:
+
+```kotlin
+Trigger(Cart.AddItem(productId = "sku-42"))
+Trigger(Auth.Login(email, password))
+Request(Fetch.Products(ProductFilter.TopRated))
+Request(Observe.Cart(userId))
+```
+
+The two axes are deliberately different. **Reaction-channel impulses group
+by domain** (`Cart`, `Auth`, `Onboarding`) because their inner types are all
+things happening inside that domain's world — an outside reader doesn't need
+to know *how* a cart item gets added, just that cart operations live in
+`Cart`. **Request-channel impulses group by intent** (`Fetch`, `Observe`)
+because the distinction that matters at a call site is "one-shot or
+streaming", not "which feature". Folding `Fetch.Products` and `Observe.Cart`
+into a `Market` object would make them harder to find by lifecycle shape,
+not easier.
+
+## Avoiding name clashes with result types
+
+When an impulse inside `Fetch` returns a single entity with the same name,
+you'll hit a local collision — `Fetch.Product(...) : DataImpulse<Product>()`
+can't coexist with a domain class also named `Product`. Two small
+conventions dodge it cleanly:
+
+- **Plural impulse → list result.** `Fetch.Products` returns
+  `List<Product>`. The impulse and the element type have different names at
+  every call site.
+- **`Detail` suffix for single entities.** `Fetch.ProductDetail` returns
+  `Product`. The suffix is short enough that it doesn't clutter call sites
+  and reads naturally — "fetch product detail" is what the caller is doing.
+
+The same rules work for `Observe`: `Observe.Cart` vs a domain type `Cart`
+either gets renamed (`Observe.CartContents`) or — more commonly — avoided
+by structuring the result type so it's not a simple alias of the impulse
+name (`List<CartItemWithProduct>`, not `Cart`).
+
+## Naming by channel
+
+Within a namespace, the verbs you reach for depend on the channel. Picking a
+name that matches the channel makes the call site read correctly —
+<Trigger /> `Trigger(Auth.Login(...))` vs <Broadcast /> `Broadcast(SessionState.Authenticated(...))`
+vs <Request /> `Request(Fetch.ProductDetail(id))`.
+
+**Reaction channel (<Trigger /> `Trigger`)** — past-tense or imperative verbs for things
+that just happened or are being asked to happen. Keep them small; a
+reaction is usually a single fact or command.
+
+| Shape                      | Examples                                                  |
+|----------------------------|-----------------------------------------------------------|
+| User-initiated commands    | `Cart.AddItem`, `Auth.Login`, `Cart.Checkout`, `Reviews.Submit` |
+| Confirmations / outcomes   | `Cart.OrderPlaced`, `Auth.LoggedIn`, `Onboarding.Completed` |
+| Failures                   | `Auth.Error(message)`, `Auth.SessionExpired`              |
+| UI side effects            | `Ui.ShowToast(message)`, `Nav.To(route)`                  |
+
+**State channel (<Broadcast /> `Broadcast`)** — nouns describing the current value. State
+is *what things are*, not *what happened*, so the names are declarative.
+Sealed hierarchies are idiomatic when the state has more than one shape —
+in that case the sealed type *is* the namespace, and there's no need for a
+separate `object` wrapper:
+
+```kotlin
+sealed interface SessionState {
+    data object LoggedOut : SessionState
+    data class Authenticated(val token: AuthToken, val user: User) : SessionState
+}
+```
+
+Other typical state types: `AppConfig`, `FeatureFlags`, `UserPreferences`,
+`CartSummary`. One type per *concept*, not per screen — screen-local state
+belongs inside a `Node`, not on the bus.
+
+**Request channel (<Request /> `Request`)** — the two common groupings split along
+lifetime lines:
+
+| Namespace  | Meaning                                                                                             |
+|------------|-----------------------------------------------------------------------------------------------------|
+| `Fetch`    | One-shot request, typically a network call that returns a value and completes.                     |
+| `Observe`  | Streaming request that keeps emitting as the underlying source changes (usually a database flow).  |
+
+A caller can tell from the namespace alone whether to expect a single
+`Success` and a `complete`, or an open-ended stream of updates. That
+distinction matters in UI code — e.g., whether to show a one-time spinner
+or a pull-to-refresh affordance.
+
+## Marker interfaces for cross-cutting fields
+
+When several impulses carry the same field — an auth token, a trace ID, a
+tenant identifier — declare a marker interface and have every participant
+implement it. Combined with a single interceptor at `REACTION_UPSTREAM` or
+`REQUEST_UPSTREAM`, one small interface replaces a lot of manual plumbing.
+
+```kotlin
+interface TokenBearer {
+    var token: String?
+}
+
+object Cart {
+    data class AddItem(
+        val productId: String,
+        val quantity: Int = 1,
+        override var token: String? = null,
+    ) : TokenBearer, Impulse()
+
+    data class Checkout(
+        val addressId: String,
+        override var token: String? = null,
+    ) : TokenBearer, Impulse()
+}
+```
+
+The interceptor was covered in the [Interceptors](/arch/interceptors/) page — one
+<Interceptor /> `Intercept<TokenBearer>` call stamps every outgoing impulse that implements
+the marker, so the concrete types don't have to know the interceptor
+exists. The same pattern works for correlation IDs, locale tags, or
+anything else that crosses enough boundaries to be worth extracting.
+
+Put the interface at the top level (or next to the domain model it
+describes), not inside the namespace object. The impulses *implement* the
+interface, but the concept (`TokenBearer`) is about the *token*, not about
+impulses.
+
+## Sealed interfaces for variant parameters
+
+When a single impulse has several mutually exclusive parameter shapes — a
+`Fetch.Products` that can filter by category, by search query, by "on
+sale", by "top rated" — pull the variant into a sealed interface and pass
+it as a single field. One impulse type, one provider, N cleanly-typed
+filter shapes:
+
+```kotlin
+sealed interface ProductFilter {
+    data object All : ProductFilter
+    data class ByCategory(val category: Category) : ProductFilter
+    data class Search(val query: String, val page: Int = 0) : ProductFilter
+    data object TopRated : ProductFilter
+    data object OnSale : ProductFilter
+    data class Personalized(val userId: String) : ProductFilter
+}
+
+object Fetch {
+    data class Products(
+        val filter: ProductFilter = ProductFilter.All,
+        val limit: Int = 20,
+    ) : DataImpulse<List<Product>>()
+}
+```
+
+The alternative — one impulse per filter variant — fragments the provider
+layer and duplicates the result type. Reserve per-variant impulses for
+cases where the *response shape* genuinely differs (e.g., `Fetch.ProductDetail`
+vs `Observe.Cart` really do produce different types); use a sealed-interface
+parameter when only the *input* varies.
+
+## State design
+
+Node state is the one place where Synapse doesn't push you toward the bus —
+a Node holds its own `@Serializable` state class and reduces over it
+locally. Keep those state types flat, keep fetched data wrapped in
+`DataState`, and don't store anything you can compute:
+
+```kotlin
+@Serializable
+data class ProductListState(
+    val products: DataState<List<Product>> = DataState.Idle,
+    val searchQuery: String = "",
+    val selectedCategory: Category? = null,
+    val isRefreshing: Boolean = false,
+)
+```
+
+**Flat** — avoid nesting state classes just because two fields feel
+related. A flat record is easier to reduce over (`update { it.copy(...) }`)
+and easier to diff at a glance.
+
+**`@Serializable`** — Compose DSL's `rememberState` automatically persists
+`@Serializable` state across configuration changes with no extra wiring.
+Unless you have a concrete reason not to, mark every Node state class
+`@Serializable` and let the framework handle rotation.
+
+**`DataState<T>` for anything fetched** — wrap any value that comes from a
+provider so the Node can render the full `Loading → Success → Error`
+lifecycle without squashing it into a nullable or a pair of booleans. The
+initial value is `DataState.Idle` while the Node mounts and the request
+has yet to subscribe.
+
+**Compute derived state on read.** If two fields combine to produce a
+third (e.g., filtered products from a full list and a selected category),
+compute the third inside the composable body on each read — don't store it
+on the state class and keep it in sync manually:
+
+```kotlin
+Node(initialState = ProductListState()) {
+    Request(Fetch.Products(ProductFilter.All)) { dataState ->
+        update { it.copy(products = dataState) }
+    }
+
+    val visible = state.products.dataOrNull
+        ?.filter { state.selectedCategory == null || it.category == state.selectedCategory }
+        .orEmpty()
+
+    ProductList(visible)
+}
+```
+
+Every read of `state` is a Compose snapshot subscription, so recomputing
+derived values on each pass is cheap and always correct. Storing `visible`
+on the state class would mean updating it from two different reducers and
+having a bug exactly once.
+
+## Next
+
+- [Testing](/arch/testing/) — writing tests with `SynapseTestRule`

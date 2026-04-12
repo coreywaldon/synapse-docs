@@ -1,0 +1,94 @@
+---
+title: Quick Start
+description: A complete Synapse Arch screen at a glance.
+---
+
+import Broadcast from '../../../assets/navigator-icons/broadcast.svg';
+import Listen from '../../../assets/navigator-icons/listen.svg';
+import Trigger from '../../../assets/navigator-icons/trigger.svg';
+import React from '../../../assets/navigator-icons/react.svg';
+import Request from '../../../assets/navigator-icons/request.svg';
+import Provider from '../../../assets/navigator-icons/provider.svg';
+import Interceptor from '../../../assets/navigator-icons/interceptor.svg';
+
+A screen is a `CreateContext` plus one or more `Node`s. `CreateContext` pushes
+a shared value down to every child composable, and each `Node` is an
+independent state machine that talks to the rest of the app through typed
+impulses on the bus — not through shared state or callbacks.
+
+```kotlin
+class AppConfig(val refreshIntervalMs: Long)
+
+data class AuthSession(val userId: String)
+data class Refresh(val timestamp: Long) : Impulse()
+data class FetchProfile(val userId: String) : DataImpulse<Profile>()
+data class Profile(val name: String, val email: String)
+
+@Composable
+fun ProfileScreen(config: AppConfig) {
+    CreateContext(config) {
+        Column {
+            ProfileCard()
+            RefreshControl()
+        }
+    }
+}
+
+// Subscribes to session state, reacts to refresh events, and fetches data.
+@Composable
+fun ContextScope<AppConfig>.ProfileCard() {
+    Node(ProfileState()) {
+        // State channel — replay=1, latest value on subscribe
+        ListenFor<AuthSession> { session ->
+            update { it.copy(userId = session.userId) }
+        }
+
+        // Reaction channel — fire-and-forget events
+        ReactTo<Refresh> { impulse ->
+            update { it.copy(lastRefresh = impulse.timestamp) }
+        }
+
+        // Request channel — refetches when lastRefresh changes
+        Request(FetchProfile(state.userId), key = state.lastRefresh) { data ->
+            update { it.copy(profile = data) }
+        }
+
+        when (val profile = state.profile) {
+            is DataState.Success -> Text("${profile.data.name} — ${profile.data.email}")
+            is DataState.Loading -> CircularProgressIndicator()
+            else -> {}
+        }
+    }
+}
+
+// Throttles clicks using its own timestamp state and the configured interval.
+@Composable
+fun ContextScope<AppConfig>.RefreshControl() {
+    Node(initialState = 0L) { // last refresh timestamp
+        Button(onClick = {
+            val now = System.currentTimeMillis()
+            if (now - state >= context.refreshIntervalMs) {
+                update { now }
+                scope.launch { Trigger(Refresh(now)) }
+            }
+        }) {
+            Text("Refresh")
+        }
+    }
+}
+```
+
+A few things to notice:
+
+- **`ProfileScreen` owns no state** — it's a context boundary plus layout.
+- **Two independent Nodes** — `ProfileCard` and `RefreshControl` share no state and hold no references to each other.
+- **All three channels are in play** — <Listen /> `ListenFor` subscribes to State, <React /> `ReactTo` + <Trigger /> `Trigger` work the Reaction channel, and <Request /> `Request` fetches data on the Request channel.
+- **`AppConfig` flows through the context** — `RefreshControl` reads `context.refreshIntervalMs` to decide whether to fire, without anyone passing the config down as a parameter. That's what `CreateContext` is for.
+- **Node state carries the throttle** — `RefreshControl`'s state is its last-refresh timestamp. The click handler checks the elapsed interval before updating the timestamp and firing a `Refresh` impulse with the new value.
+- **The <Request /> `Request` key re-runs the fetch** — `ProfileCard` uses `state.lastRefresh` as the `key`, so each new refresh timestamp triggers a fresh Provider run.
+
+## Next
+
+- [Three Channels](/arch/channels/) — State, Reaction, Request in depth
+- [Compose DSL](/arch/compose-dsl/) — `CreateContext`, `Node`, and `NodeScope`
+- [Providers](/arch/providers/) — how <Request /> `Request` gets fulfilled

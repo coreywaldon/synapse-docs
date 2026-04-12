@@ -1,0 +1,106 @@
+---
+title: Synapse Navigator
+description: An IntelliJ plugin that makes Synapse's bus architecture legible in the editor — gutter icons, live topology maps, unconnected-channel inspections, and quick navigation between producers and consumers.
+---
+
+import Broadcast from '../../../assets/navigator-icons/broadcast.svg';
+import Listen from '../../../assets/navigator-icons/listen.svg';
+import Trigger from '../../../assets/navigator-icons/trigger.svg';
+import React from '../../../assets/navigator-icons/react.svg';
+import Request from '../../../assets/navigator-icons/request.svg';
+import Provider from '../../../assets/navigator-icons/provider.svg';
+import Interceptor from '../../../assets/navigator-icons/interceptor.svg';
+
+Synapse Navigator is an IntelliJ plugin that adds traceability tooling for
+Synapse Arch on top of IntelliJ IDEA and Android Studio. The bus decouples
+producers from consumers at runtime, which is the whole point of the
+architecture — but it also means <Trigger /> `Trigger(LoginRequested)` in one file and
+<React /> `ReactTo<LoginRequested>` in another have no direct static link that the
+IDE's built-in navigation can follow. Navigator fills that gap: every
+Synapse call site gets a clickable gutter icon, a tool window shows the
+full topology of the bus, and an inspection flags channels with no
+counterpart before they hit runtime.
+
+## What it gives you
+
+- **Gutter navigation** at every <Broadcast /> `Broadcast`, <Listen /> `ListenFor`, <Trigger /> `Trigger`,
+  <React /> `ReactTo`, <Request /> `Request`, <Provider /> `@SynapseProvider`, and <Interceptor /> `Intercept` call site —
+  click to see all connected counterparts and jump to them.
+- **A tool window** (*View > Tool Windows > SynapseLib*) with three views:
+  a type-oriented map, a flow-oriented wiring diagram, and an interceptor
+  list. Each supports search and double-click navigation.
+- **Mermaid export** of the live topology for pasting into docs, design
+  reviews, or a PR description.
+- **An unconnected-channel inspection** that highlights a <Broadcast /> `Broadcast` with
+  no <Listen /> `ListenFor`, a <React /> `ReactTo` with no <Trigger /> `Trigger`, or a <Request /> `Request` with no
+  <Provider /> `@SynapseProvider`, and offers a **Generate Counterpart** quick fix
+  that stubs the missing half.
+- **Find Usages integration** — Ctrl+Click on a channel type now includes
+  every <Broadcast /> `Broadcast`/<Listen /> `ListenFor`/<Trigger /> `Trigger`/<React /> `ReactTo`/<Request /> `Request` /<Interceptor /> `Intercept`
+  call site alongside normal code references.
+- **Code completion** inside type argument brackets with counterpart-aware
+  prioritization.
+- **Quick Documentation** (Ctrl+Q) with live connection counts.
+- **Inlay hints** after each call showing counterpart counts (e.g.
+  `3 listeners`, `2 sources`, `⚠ no reactors`).
+
+The sections that follow walk through each of these in turn.
+
+## Compatibility
+
+| Requirement             | Version                          |
+|-------------------------|----------------------------------|
+| IntelliJ IDEA           | 2024.2 – 2025.3 (builds 242–253) |
+| Kotlin plugin           | Required (bundled with IDEA)     |
+| JVM toolchain           | 17                               |
+
+Android Studio releases that are based on one of the supported IDEA
+platform versions work the same way — Navigator depends only on the
+IntelliJ platform and the Kotlin plugin, not on Android-specific APIs.
+
+## Installation
+
+Navigator is distributed as a standalone IntelliJ plugin. Build it from
+source in the `synapse-plugin` module:
+
+```bash
+./gradlew :synapse-plugin:buildPlugin
+```
+
+That produces a zip under `synapse-plugin/build/distributions/`. Install
+it in your IDE via **Settings > Plugins > ⚙ > Install Plugin from
+Disk…** and restart when prompted. Navigator registers itself as
+`Synapse Navigator` in the plugin list and begins scanning on the next
+project open.
+
+## First-time setup
+
+The first time you open a project that has SynapseLib on the classpath,
+Navigator runs a **Build Map** scan — it walks every Kotlin source file
+in the relevant modules, collects every <Broadcast /> `Broadcast`/<Listen /> `ListenFor`/
+<Trigger /> `Trigger`/<React /> `ReactTo`/<Request /> `Request`/<Interceptor /> `Intercept` call and every
+<Provider /> `@SynapseProvider` class, and caches the results. Subsequent changes
+kick off incremental rescans, debounced by a configurable delay.
+
+Scanning is scoped to modules that actually depend on SynapseLib, so a
+multi-module project with only one feature using Synapse doesn't pay for
+the whole workspace on every edit.
+
+## Settings
+
+Navigator's preferences live under **Settings > Tools > SynapseLib**:
+
+| Setting                         | Default | Purpose                                                                                 |
+|---------------------------------|---------|-----------------------------------------------------------------------------------------|
+| Function name aliases           | *(empty)* | Comma-separated aliases per SynapseLib function — e.g. add `MyBroadcast` so a custom wrapper is treated as a <Broadcast /> `Broadcast`. |
+| Staleness debounce (ms)         | `500`   | How long after a file change Navigator waits before marking the cache stale and rescanning. |
+| Auto-refresh on file changes    | `true`  | Whether incremental rescans happen automatically. Turn it off if you'd rather hit **Build Map** manually. |
+
+Aliases are the most commonly-touched setting. If your codebase wraps
+<Trigger /> `Trigger` in a domain-specific helper (`fireAction { … }`), add its name
+to the <Trigger /> `Trigger` alias list and Navigator will pick up every call site
+as if it were the real thing.
+
+## Next
+
+- [Gutter Navigation](/navigator/gutter-navigation/) — clickable icons at every Synapse call site

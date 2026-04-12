@@ -1,0 +1,85 @@
+---
+title: Introduction
+description: What Synapse is and the problem it solves.
+---
+
+import Broadcast from '../../../assets/navigator-icons/broadcast.svg';
+import Listen from '../../../assets/navigator-icons/listen.svg';
+import Trigger from '../../../assets/navigator-icons/trigger.svg';
+import React from '../../../assets/navigator-icons/react.svg';
+import Request from '../../../assets/navigator-icons/request.svg';
+import Provider from '../../../assets/navigator-icons/provider.svg';
+import Interceptor from '../../../assets/navigator-icons/interceptor.svg';
+
+**Synapse Arch** is an architecture framework for Kotlin and Jetpack Compose that
+eliminates cross-feature coordination as a concern. Every component is an
+isolated state machine with typed inputs and outputs. Components never hold
+references to each other — they communicate exclusively through a central bus
+called the **SwitchBoard**.
+
+## The coordination problem
+
+Most architectures accumulate coordination code as a feature grows. ViewModel A
+needs to know about ViewModel B. A new checkout screen needs to react to a
+session timeout that originally lived inside auth. Over time, the graph of
+"who-calls-who" becomes the architecture itself, and every new feature requires
+wiring into every relevant existing feature.
+
+The result: adding a feature is not additive. It changes existing features.
+Tests multiply. Refactors become risky. Correctness becomes a property of the
+whole graph, not the individual pieces.
+
+## How Synapse solves it
+
+Synapse enforces that components only communicate through typed messages
+(**impulses**) dispatched on the SwitchBoard. A component declares the impulses
+it emits and the impulses it consumes. That's its entire contract with the rest
+of the app.
+
+Because components share only impulse types:
+
+- **Adding Feature B never requires modifying Feature A.** If B wants to react to
+  something A already emits, it subscribes to that impulse type. A doesn't know B
+  exists.
+- **Cross-cutting concerns become interceptors.** Auth, analytics, logging,
+  session management — all of these are composable middleware that runs on the
+  bus, not wiring threaded through feature code.
+- **Testing is real-bus, no mocks.** The SwitchBoard is the same in tests as in
+  production. You verify behavior by observing what impulses a component emits
+  given a sequence of inputs.
+
+This gives you a property most architectures can't: **compositional
+correctness**. If Component A works through the SwitchBoard and Component B
+works through the SwitchBoard, then A + B works — because the bus is real and
+the type system enforces the contract.
+
+## Three channels
+
+The SwitchBoard routes three kinds of traffic:
+
+| Channel      | Replay | Use for                                                                      |
+|--------------|--------|------------------------------------------------------------------------------|
+| **State**    | 1      | Persistent state streams — new subscribers get the latest value              |
+| **Reaction** | 0      | Fire-and-forget events — only active collectors receive them                 |
+| **Request**  | 1      | Data fetching via Providers — full `Loading` / `Success` / `Error` lifecycle |
+
+Each channel has upstream and downstream interceptor slots, so cross-cutting
+concerns slot in at a well-defined place. You'll see these throughout the docs;
+each gets a dedicated page later.
+
+## No ViewModels
+
+Synapse replaces the ViewModel entirely.
+
+- **Compose** screens use the `Node` / `CreateContext` DSL. `Node` holds
+  screen-local state; `CreateContext` provides shared services without prop
+  drilling.
+- **Non-Compose** contexts — services, background work, non-Compose UI — use
+  `Coordinator`, which gives you the same bus access outside a composable body.
+- **Data fetching** is handled by **Providers** wired automatically via KSP.
+  Plug into Hilt or Koin and providers are registered at build time.
+
+## Next
+
+Continue to **[Installation](/getting-started/installation/)** to add Synapse
+Arch to your project.

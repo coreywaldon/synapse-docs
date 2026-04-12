@@ -1,0 +1,7 @@
+/* Inline SVG icons (Navigator glyphs) inside prose should flow with
+   text, not force a line break. Mermaid diagrams use the img-svg
+   strategy so they render as <img>, not <svg>, and are unaffected. */
+.sl-markdown-content svg {
+	display: inline-block;
+	vertical-align: -0.2em;
+}

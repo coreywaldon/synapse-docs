@@ -1,0 +1,114 @@
+---
+title: Editor Assistance
+description: Find Usages, code completion, Quick Documentation, and inlay hints — Synapse-aware variants of everything you already use.
+---
+
+import Broadcast from '../../../assets/navigator-icons/broadcast.svg';
+import Listen from '../../../assets/navigator-icons/listen.svg';
+import Trigger from '../../../assets/navigator-icons/trigger.svg';
+import React from '../../../assets/navigator-icons/react.svg';
+import Request from '../../../assets/navigator-icons/request.svg';
+import Provider from '../../../assets/navigator-icons/provider.svg';
+import Interceptor from '../../../assets/navigator-icons/interceptor.svg';
+
+Gutter icons and the tool window are the two *new* surfaces Navigator
+adds. Everything on this page is an extension of something the IDE
+already does — Find Usages, completion, Quick Doc, inlay hints — taught
+to understand SynapseLib call sites as first-class references rather
+than untyped bus traffic.
+
+## Find Usages
+
+Ctrl+Click (or **Find Usages**) on a channel type already lists the
+places it's referenced as a Kotlin type. Navigator extends that result
+to include every place the type participates in the bus:
+
+- <Broadcast /> `Broadcast<T>` and <Listen /> `ListenFor<T>` — state
+  producers and consumers.
+- <Trigger /> `Trigger<T>` and <React /> `ReactTo<T>` — reaction
+  producers and consumers.
+- <Request /> `Request<I, N>` call sites and <Provider />
+  <Provider /> `@SynapseProvider` classes for which `T` is the impulse or the need.
+- <Interceptor /> `Intercept<T>` calls, including cases where `T` is a
+  supertype or marker interface.
+
+These entries sit alongside the normal Kotlin references in the Find
+Usages window, so the "where is this used?" view matches what the bus
+actually does at runtime — not just the subset the compiler can see.
+
+## Code Completion
+
+Inside a Synapse function's type argument brackets — <Listen /> `ListenFor<|>`,
+<Trigger /> `Trigger<|>`, <Interceptor /> `Intercept<|>`, <Request /> `Request<|>` — Navigator contributes
+completion items ordered by relevance to the call you're writing:
+
+1. **Counterpart types (bold)** — types that already have a matching
+   counterpart elsewhere in the project. A <Listen /> `ListenFor<|>` offers every
+   type that is already being <Broadcast /> `Broadcast`, with a detail hint like
+   `"2 listeners in TaskList, Dialogs"` so you know which feature is
+   fanning out.
+2. **Same-channel types** — other types used on the same channel
+   elsewhere in the file or module. Useful when you know you want to
+   listen for something in this feature but don't remember the exact
+   name.
+3. **All known SynapseLib types** — the full cache, as a fallback.
+
+The ordering encodes the pragmatic priority of the question "what
+should go in here?" — most of the time, you're wiring up a consumer
+for a producer that already exists, so counterparts come first. Bold
+styling makes them easy to spot without reading the detail hints.
+
+## Quick Documentation
+
+Hover or press Ctrl+Q on a Synapse function name (<Broadcast /> `Broadcast`,
+<Listen /> `ListenFor`, <Trigger /> `Trigger`, <React /> `ReactTo`, <Request /> `Request`, <Interceptor /> `Intercept`) or on the
+type argument itself to see a Synapse-aware Quick Doc popup. It shows:
+
+- **Channel type and role** — "State producer", "Reaction consumer",
+  "Request caller", "Downstream interceptor on REQUEST channel".
+- **Connection stats** — live counts pulled from the cache: how many
+  listeners a broadcaster has, how many reactors a trigger has, which
+  provider class handles a request and what it returns.
+- **Interceptor list** — every interceptor that would affect this
+  call, with direction and priority.
+
+This is the fastest way to answer "is this going anywhere?" without
+leaving the call site. Where standard Quick Doc would show the
+function's KDoc and nothing else, Navigator's version shows the live
+wiring, so the question stops being "what does the API say" and
+becomes "what is actually connected".
+
+## Inlay Hints
+
+Inline annotations appear at the end of each SynapseLib call, showing
+counterpart counts against the current cache:
+
+```kotlin
+Broadcast<TaskUpdated>(data)       // 3 listeners
+ListenFor<TaskUpdated> { }         // 2 sources
+Trigger<SortChanged>(event)        // 1 reactor
+ReactTo<SortChanged> { }           // 1 source
+Request<FetchTasks, List<Task>>()  // TaskListProvider → List<Task>
+Intercept<Any>(...)                // 12 targets (3↑ 4↓ 1↕)
+```
+
+Unconnected calls show a warning form — `⚠ no listeners`, `⚠ no
+reactors`, `⚠ no provider` — which is the same condition the
+unconnected-channel inspection surfaces, surfaced inline so it's
+impossible to miss while scrolling.
+
+The <Interceptor /> `Intercept<T>` hint uses arrows to summarize the interceptor's
+reach: `↑` for upstream matches, `↓` for downstream matches, and `↕`
+for types where the interceptor is installed at both points. For a
+broadly-scoped marker interface like `TokenBearer` the aggregated count
+is the most compact way to see at a glance whether a new concrete
+impulse is being covered.
+
+Inlay hints respect the standard IDE toggle — **Settings > Editor >
+Inlay Hints > Synapse Navigator** — so if you prefer a cleaner editor
+you can turn them off per hint type without disabling the rest of the
+plugin.
+
+## Next
+
+- [Inspections](/navigator/inspections/) — unconnected-channel warnings and the Generate Counterpart quick fix

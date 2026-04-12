@@ -1,0 +1,319 @@
+---
+title: Compose DSL
+description: CreateContext, Node, and NodeScope — the two primitives every Synapse screen is built from.
+---
+
+import Broadcast from '../../../assets/navigator-icons/broadcast.svg';
+import Listen from '../../../assets/navigator-icons/listen.svg';
+import Trigger from '../../../assets/navigator-icons/trigger.svg';
+import React from '../../../assets/navigator-icons/react.svg';
+import Request from '../../../assets/navigator-icons/request.svg';
+import Provider from '../../../assets/navigator-icons/provider.svg';
+import Interceptor from '../../../assets/navigator-icons/interceptor.svg';
+
+Every Synapse screen is built from two primitives: `CreateContext` establishes
+a boundary that pairs a value with the nearest `SwitchBoard`, and `Node`
+creates an independent stateful unit inside that boundary. Child composables
+participate in the bus by declaring themselves as `ContextScope<T>`
+extensions.
+
+## `CreateContext`
+
+`CreateContext` establishes a context boundary. It pairs an arbitrary value
+with the nearest `SwitchBoard` so every composable inside the block has typed
+access to both.
+
+```kotlin
+CreateContext(appServices) {
+    // `this` is ContextScope<AppServices>
+    Node(initialState = UiState()) {
+        // `this` is NodeScope<AppServices, UiState>
+    }
+}
+```
+
+The value you pass in (`appServices` above) is read-only inside the block via
+the `context` property. It's the way to make shared services or configuration
+available throughout a screen without threading them through composable
+parameters.
+
+Optional `tag` parameter enables tracing:
+
+```kotlin
+CreateContext(appServices, tag = "CheckoutScreen") { ... }
+```
+
+### How it works
+
+`CreateContext` reads the `SwitchBoard` from `LocalSwitchBoard` — a Compose
+`CompositionLocal` typically provided at the root of your app:
+
+```kotlin
+CompositionLocalProvider(LocalSwitchBoard provides mySwitchBoard) {
+    MyApp()
+}
+```
+
+It then builds a `ContextScope(context, switchboard, tag)` via
+`remember(context, switchboard, tag)`, so the scope instance is retained
+across recompositions and only replaced when the context value, the
+switchboard, or the tag changes identity. There are no side effects — the
+whole composable is just `scope.block()`.
+
+The `ContextScope` itself is a plain class holding three fields: `context`,
+`switchboard`, and `tag`. Its only suspend members are <Trigger /> `Trigger` and
+<Broadcast /> `Broadcast`, which forward to the switchboard and optionally wrap the call
+in a `TraceContext` when `tag` is non-null. When `tag` is null there is no
+tracing overhead.
+
+### Nested contexts
+
+`CreateContext` can nest. Use it inside a Node to change the context *type*
+for child components — typically when rendering a list where each child needs
+scoped access to its own item:
+
+```kotlin
+CreateContext(appServices) {
+    Node(initialState = HomeState()) {
+        Request(FetchProducts(filter)) { dataState ->
+            update { it.copy(products = dataState) }
+        }
+
+        state.products.dataOrNull?.forEach { product ->
+            // Switch context to Product — ProductCard sees ContextScope<Product>
+            CreateContext(product) {
+                ProductCard()
+            }
+        }
+    }
+}
+```
+
+Inside the nested block, the context type is `Product`, so any
+`ContextScope<Product>` extension composable gets typed access to the current
+product via `context`.
+
+## `Node`
+
+`Node` is the fundamental unit of the Compose DSL. It holds screen-local state
+and exposes the full SwitchBoard DSL for subscribing to, fetching, and
+emitting impulses.
+
+```kotlin
+Node(initialState = ScreenState()) {
+    Text("Count: ${state.count}")
+
+    Button(onClick = { update { it.copy(count = it.count + 1) } }) {
+        Text("Increment")
+    }
+
+    ListenFor<ThemeSettings> { settings ->
+        update { it.copy(darkMode = settings.darkMode) }
+    }
+
+    ReactTo<NavigateTo> { event ->
+        navController.navigate(event.route)
+    }
+
+    Request(FetchUserProfile(userId = 42)) { dataState ->
+        update { it.copy(profileState = dataState) }
+    }
+}
+```
+
+A Node is an independent state machine. Sibling Nodes on the same screen share
+no state and hold no references to each other — they coordinate (if they need
+to) through the bus.
+
+### How it works
+
+Inside, `Node` does three things:
+
+1. **Creates the state holder** via `rememberState(initialState)`. If the
+   state type `S` is `@Serializable` (kotlinx.serialization),
+   `rememberState` wraps it in a JSON-backed `Saver` and uses
+   `rememberSaveable`, so state survives configuration changes automatically.
+   Otherwise it falls back to plain `remember { mutableStateOf(...) }`. The
+   serializer lookup is cached per type, so marking state `@Serializable` is
+   the *only* thing you need to do for persistence.
+2. **Creates a coroutine scope** via
+   `rememberCoroutineScope { Dispatchers.Main.immediate }`. All work launched
+   through the NodeScope's `scope` runs on the main dispatcher by default.
+3. **Remembers a `NodeScope`** tied to the enclosing `ContextScope` and the
+   coroutine scope, then installs a `DisposableEffect` that calls
+   `nodeScope.dispose()` when the Node leaves the composition. Disposal
+   unregisters any interceptors added via <Interceptor /> `Intercept`.
+
+The state holder itself is a `MutableState<S>` from Compose. Reading `state`
+inside composition subscribes the caller to recomposition via Compose's
+snapshot system, so any composable that reads `state` automatically
+recomposes when `update` replaces the value.
+
+## `NodeScope`
+
+Inside a `Node { ... }` block, `this` is a `NodeScope<C, S>` where `C` is the
+surrounding context type and `S` is the Node's state type. Everything the
+Node can do comes from this scope.
+
+**Properties:**
+
+| Property  | Type             | Purpose                                                            |
+|-----------|------------------|--------------------------------------------------------------------|
+| `context` | `C`              | Read-only access to the value from `CreateContext`                 |
+| `state`   | `S`              | Current snapshot of local state (triggers recomposition on change) |
+| `scope`   | `CoroutineScope` | For launching coroutines (e.g., to <Trigger /> `Trigger` from click handlers)  |
+
+**Capabilities:**
+
+| Category              | Method                                    | Composable? |
+|-----------------------|-------------------------------------------|-------------|
+| **Local state**       | `update { reducer }`                      | No          |
+| **State broadcast**   | <Broadcast /> `Broadcast(data)`                         | No (suspend)|
+| **Reactions**         | <Trigger /> `Trigger(event)`                          | No (suspend)|
+| **Interception**      | <Interceptor /> `Intercept(point, interceptor, priority)` | No          |
+| **Request**           | <Request /> `Request(impulse, key) { handler }`       | Yes         |
+| **Listen (state)**    | <Listen /> `ListenFor(stateKey) { handler }`         | Yes         |
+| **Listen (reaction)** | <React /> `ReactTo(reactionKey) { handler }`        | Yes         |
+
+### State updates
+
+`update { reducer }` is synchronous. It applies the reducer to the current
+snapshot and writes the result back to the `MutableState<S>`:
+
+```kotlin
+update { it.copy(count = it.count + 1) }
+```
+
+Because the state holder is a Compose `MutableState`, writing a new value
+triggers recomposition of any composable that read `state`. The reducer
+should be pure — treat the current state as immutable and return a new one.
+
+### Suspend vs composable
+
+The DSL methods come in two flavors:
+
+- **Imperative, suspending** — `update`, <Broadcast /> `Broadcast`, <Trigger /> `Trigger`, <Interceptor /> `Intercept`.
+  Call these from callbacks, `LaunchedEffect` bodies, or inside
+  `scope.launch { }` from non-suspend contexts like click handlers.
+- **Composable, lifecycle-aware** — <Request /> `Request`, <Listen /> `ListenFor`, <React /> `ReactTo`. Call
+  these directly in the composition body.
+
+### Lifecycle-aware subscriptions
+
+<Listen /> `ListenFor`, <React /> `ReactTo`, and <Request /> `Request` each install a `DisposableEffect` keyed
+on the NodeScope and the user-provided key. On first composition (and
+whenever the key changes) they launch a collecting coroutine on the Node's
+`scope`; on disposal (or key change) they cancel that coroutine. The
+user-provided handler is wrapped in `rememberUpdatedState` so the latest
+lambda is always invoked, even if the surrounding composable recomposes with
+a new closure.
+
+Keys default to `Unit` for <Listen /> `ListenFor`/<React /> `ReactTo` (stable — the subscription
+survives recompositions) and to the impulse itself for <Request /> `Request` (so a new
+set of params relaunches the fetch).
+
+### Interceptor cleanup
+
+<Interceptor /> `Intercept` returns a `Registration` handle; `NodeScope` accumulates these in
+an internal list and calls `unregister()` on all of them when the Node
+disposes. You don't need to track registrations yourself — installing an
+interceptor inside a Node scopes it to that Node's lifetime.
+
+## `ContextScope` extensions
+
+Child composables participate in the bus by declaring themselves as
+extensions on `ContextScope<T>`. This is the idiomatic way to build a screen
+out of smaller composables without prop-drilling services.
+
+```kotlin
+@Composable
+fun ContextScope<ScreenContext>.TaskItem(task: Task, modifier: Modifier = Modifier) {
+    val scope = rememberCoroutineScope()
+
+    Card(
+        modifier = modifier.clickable {
+            scope.launch { Trigger(TaskUpdated(task.copy(done = !task.done))) }
+        }
+    ) {
+        Text(task.title)
+    }
+}
+```
+
+A `ContextScope<T>` extension has access to `context`, <Trigger /> `Trigger`, and
+<Broadcast /> `Broadcast` directly via the receiver — but **not** `scope`. A coroutine
+scope is a property of `NodeScope`, not `ContextScope`. Since <Trigger /> `Trigger` and
+<Broadcast /> `Broadcast` are suspend functions, a `ContextScope` extension that needs to
+call them from a click handler or callback must grab its own with
+`rememberCoroutineScope()`.
+
+Put a `Node` inside the extension to get both local state and a coroutine
+scope in one step — inside the Node block, `this` is a `NodeScope`, which
+exposes `scope`, `state`, and `update` directly:
+
+```kotlin
+@Composable
+fun ContextScope<AppConfig>.ProfileCard() {
+    Node(initialState = ProfileState()) {
+        // scope, state, update, ListenFor, ReactTo, Request all available here
+        ListenFor<AuthSession> { session ->
+            update { it.copy(userId = session.userId) }
+        }
+        // ... UI ...
+    }
+}
+```
+
+## State persistence
+
+If a Node's state type is annotated `@Serializable` (kotlinx.serialization),
+state is automatically saved and restored across configuration changes. No
+extra wiring.
+
+```kotlin
+@Serializable
+data class ScreenState(
+    val query: String = "",
+    val selectedTab: Int = 0,
+)
+
+Node(initialState = ScreenState()) { ... }
+```
+
+Under the hood, `rememberState` looks up a `KSerializer<S>` via
+`serializer<S>()` and, if one exists, wraps `mutableStateOf(initialState)` in
+`rememberSaveable` with a JSON-backed `Saver`. The serializer lookup is
+cached per type, so it only runs once per `S` over the life of the process.
+
+## Prefer impulses over callbacks
+
+A child composable that lives inside a `ContextScope` already has bus access.
+Don't pass `onSomething` callbacks down to it — have it fire impulses
+directly and let the parent Node react.
+
+```kotlin
+// Anti-pattern — threads state changes through a callback
+CheckoutContent(
+    onSubmit = { scope.launch { Trigger(Checkout.Submit(id)) } }, // ❌
+)
+
+// Correct — child fires the impulse itself
+@Composable
+fun ContextScope<AppServices>.CheckoutContent(state: CheckoutState) {
+    val scope = rememberCoroutineScope()
+    Button(onClick = {
+        scope.launch { Trigger(Checkout.Submit(state.selectedId!!)) } // ✅
+    }) { Text("Place Order") }
+}
+```
+
+Passing **read-only display data** as parameters is fine. Passing lambdas to
+**pure UI leaf components** (things like `AddressRow`, `Button` — composables
+that don't touch the bus) is also fine, since they don't participate in the
+bus at all. The rule applies specifically to bus-aware children: if a child
+is a `ContextScope` extension, it should emit impulses, not receive
+callbacks.
+
+## Next
+
+- [Coordinators](/arch/coordinators/) — the same three channels, outside Compose

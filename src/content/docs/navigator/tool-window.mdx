@@ -1,0 +1,148 @@
+---
+title: Tool Window
+description: A project-wide view of every channel, every interceptor, and every connection — with search, navigation, and Mermaid export.
+---
+
+import Broadcast from '../../../assets/navigator-icons/broadcast.svg';
+import Listen from '../../../assets/navigator-icons/listen.svg';
+import Trigger from '../../../assets/navigator-icons/trigger.svg';
+import React from '../../../assets/navigator-icons/react.svg';
+import Request from '../../../assets/navigator-icons/request.svg';
+import Provider from '../../../assets/navigator-icons/provider.svg';
+import Interceptor from '../../../assets/navigator-icons/interceptor.svg';
+
+Gutter icons answer "who else touches *this* call site?" The tool window
+answers "what does the bus look like across the whole project?". Open it
+from **View > Tool Windows > SynapseLib**. It docks to the bottom of the
+IDE like the Run or Version Control panels and has three tabs — each one
+a different cut through the same cached topology.
+
+## Type Map
+
+The Type Map lists every type the project uses on any Synapse channel,
+with a hook count rolled up next to each entry. Expanding a type reveals
+the individual call sites, grouped by role — <Broadcast /> broadcasts,
+<Listen /> listeners, <Trigger /> triggers, <React /> reactors,
+<Request /> requesters, <Provider /> providers, and <Interceptor />
+interceptors:
+
+```
+UserLoggedIn                                  6 hooks
+├─ Broadcasts      (1)
+│   └─ AuthCoordinator.kt:42
+├─ Listeners       (3)
+│   ├─ HomeNode.kt:18
+│   ├─ ProfileNode.kt:24
+│   └─ AnalyticsCoordinator.kt:9
+└─ Interceptors    (2)
+    ├─ ↑ AnalyticsInterceptor (priority 0)
+    └─ ↓ SessionLoggerInterceptor (priority 100)
+```
+
+This is the view you reach for when you want to understand a *type's*
+footprint — which features react to `UserLoggedIn`, how many listeners
+are subscribed to `CartSummary`, whether a particular `DataImpulse` has
+exactly one provider or has accidentally grown a second one in another
+module. Every leaf entry is double-clickable: it opens the file at the
+exact call site.
+
+## Flow Map
+
+Flow Map flips the orientation. Instead of grouping by type, it lists
+every channel wiring as a directed edge — <Broadcast /> to <Listen />
+for state, <Trigger /> to <React /> for reactions, and <Request /> to
+<Provider /> for data requests:
+
+```
+State
+  AuthCoordinator.Broadcast<SessionState>    →  HomeNode.ListenFor<SessionState>
+  AuthCoordinator.Broadcast<SessionState>    →  ProfileNode.ListenFor<SessionState>
+
+Reaction
+  CartScreen.Trigger<AddItem>                →  CartCoordinator.ReactTo<AddItem>
+  ProductRow.Trigger<AddItem>                →  CartCoordinator.ReactTo<AddItem>
+
+Request
+  CheckoutNode.Request<FetchAddresses>       →  AddressProvider  ⇒  List<Address>
+  CheckoutNode.Request<FetchCachedToken>     →  TokenProvider    ⇒  AuthToken
+```
+
+Each row pairs a producer with one of its consumers (or, for Request, a
+caller with its provider and declared return type). If a type has no
+counterpart, the "→" is replaced with a warning marker and the row
+moves to the top of its section so it's the first thing you see.
+
+Flow Map is the view for code review and onboarding: the whole "what
+fires what?" graph in one scrollable column.
+
+## <Interceptor /> Interceptors
+
+The third tab groups every <Interceptor /> `Intercept<T>(…)` registration by its type
+argument and lists the ones that are currently installed project-wide.
+Each entry shows:
+
+| Column     | Meaning                                                              |
+|------------|----------------------------------------------------------------------|
+| Type       | The `T` in <Interceptor /> `Intercept<T>`, including marker interfaces.              |
+| Channel    | `STATE`, `REACTION`, or `REQUEST`.                                   |
+| Direction  | `UPSTREAM` (↑) or `DOWNSTREAM` (↓).                                  |
+| Priority   | The `Int` priority the interceptor was registered with.             |
+| Location   | File and line of the <Interceptor /> `Intercept(...)` call.                          |
+
+Grouping by type argument makes it easy to spot a stack of middleware
+on the same type — three interceptors on `TokenBearer`, say — and
+verify the priority ordering is what you expect before a bug lands.
+
+## Search and navigation
+
+All three tabs share a toolbar search box that filters the tree
+incrementally as you type. Matches highlight in place and parent nodes
+auto-expand to reveal them, so typing `Cart` in the Type Map
+immediately narrows the view to `AddItem`, `RemoveItem`, `Checkout`,
+`CartUpdated`, and their hooks.
+
+Double-clicking any leaf row navigates to the source location in the
+editor. A status bar at the bottom of the tool window shows the total
+hook count and the number of files scanned, which is a useful sanity
+check after a refactor: if the total hook count drops unexpectedly, a
+call site is probably no longer being picked up — often because its
+wrapper function alias is missing from settings.
+
+## Mermaid export
+
+The tool window's toolbar has an **Export as Mermaid** action. It
+copies a Mermaid `flowchart` of the current topology to the clipboard,
+ready to paste into a PR description, a design doc, or the Arch docs
+themselves.
+
+The exported diagram uses subgraphs to group nodes by role:
+
+- **Sources** — every <Broadcast /> `Broadcast` and <Trigger />
+  <Trigger /> `Trigger` call site.
+- **Consumers** — every <Listen /> `ListenFor` and <React /> `ReactTo`
+  call site.
+- **Coordinators** — <Request /> <Provider /> `@SynapseProvider` and <Request /> `Request` call
+  sites on the request channel, plus any coordinator identified by tag.
+- **Providers** — <Provider /> generated providers and their declared
+  return types.
+
+Edge styles encode channel semantics:
+
+| Edge style | Channel   |
+|------------|-----------|
+| Solid      | State     |
+| Dotted     | Reaction  |
+| Double     | Request   |
+
+Unconnected nodes — a <Broadcast /> `Broadcast` with no <Listen /> `ListenFor`, for example —
+are tagged with a warning marker in the exported diagram, so the
+warning survives the clipboard round-trip and shows up in whatever
+tool renders the Mermaid source.
+
+This is a one-command way to get a snapshot of a feature's bus traffic
+into a PR description, without hand-drawing it and without falling out
+of date the moment someone renames a type.
+
+## Next
+
+- [Editor Assistance](/navigator/editor-assistance/) — Find Usages, completion, Quick Doc, inlay hints

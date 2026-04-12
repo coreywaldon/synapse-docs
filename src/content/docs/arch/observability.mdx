@@ -1,0 +1,164 @@
+---
+title: Observability
+description: Seeing what's on the bus — global logging, type-specific logging, and origin-tagged trace contexts.
+---
+
+import Broadcast from '../../../assets/navigator-icons/broadcast.svg';
+import Listen from '../../../assets/navigator-icons/listen.svg';
+import Trigger from '../../../assets/navigator-icons/trigger.svg';
+import React from '../../../assets/navigator-icons/react.svg';
+import Request from '../../../assets/navigator-icons/request.svg';
+import Provider from '../../../assets/navigator-icons/provider.svg';
+import Interceptor from '../../../assets/navigator-icons/interceptor.svg';
+
+A bus-based architecture earns its keep in production by being easy to
+*see* at runtime. Every impulse, every broadcast, every request crosses
+the same chokepoint — the `SwitchBoard` — which means a single well-placed
+listener can reveal the full behavior of an app without sprinkling log
+calls through handlers. Synapse ships three levels of observation,
+ordered by coverage and cost:
+
+| Level                         | Sees                                          | When to reach for it                             |
+|-------------------------------|-----------------------------------------------|--------------------------------------------------|
+| Global logger                 | Every value, every type, every intercept point | Dev-time firehose; "what just happened?"          |
+| `addLoggingInterceptors<T>`   | Every value of a specific type                 | Tracing one feature or one channel in isolation  |
+| `TraceContext` + listener     | Values fired from tagged emitters, with origin | "*Where* is this impulse coming from?"           |
+
+All three are read-only observers — they can't change what's on the bus,
+only watch it.
+
+## The global logger
+
+`setGlobalLogger` installs a single callback that fires for every value
+crossing every intercept point, in every direction, on every channel:
+
+```kotlin
+switchBoard.setGlobalLogger { point, clazz, data ->
+    Log.d("SwitchBoard", "[$point] ${clazz.simpleName}: $data")
+}
+```
+
+The signature is `(InterceptPoint, KClass<*>, Any) -> Unit`. The logger
+runs *after* the interceptor pipeline at each point, so the `data` it
+sees is the fully-transformed value a consumer is about to receive —
+token already injected, normalization already applied. Pass `null` to
+remove.
+
+This is deliberately a single slot, not a list. The global logger is the
+"dev console" hook — it's fine for interactive debugging, for bringing up
+a new feature, or for an in-app debug drawer. In production you'd
+typically route it through a ring buffer or a conditional log tag rather
+than leaving it wired unconditionally.
+
+## Type-specific logging
+
+When you only care about one domain, install a six-point read-only
+interceptor bracket for a single type:
+
+```kotlin
+switchBoard.addLoggingInterceptors<OrderPlaced> { event ->
+    Log.d("Orders", "order placed: ${event.orderId}")
+}
+```
+
+Under the hood this registers six <Interceptor /> `Interceptor.read<OrderPlaced>`
+instances — one per intercept point — at priorities that put upstream
+loggers first (`Int.MIN_VALUE`) and downstream loggers last
+(`Int.MAX_VALUE`). The result is a clean bracket around every pass
+through the bus for that type, without affecting interceptors on any
+other type.
+
+Because interception is keyed by `Class.isAssignableFrom`, you can pass
+a marker interface and cover every impulse that implements it:
+
+```kotlin
+interface AnalyticsEvent
+switchBoard.addLoggingInterceptors<AnalyticsEvent> { event -> analytics.track(event) }
+```
+
+The concrete events don't need to know the logger exists — they just
+need to implement the marker. The pattern is identical to the one used
+for `TokenBearer` interceptors in the [Interceptors](/arch/interceptors/) page.
+
+## Origin tracing with `TraceContext`
+
+The global logger tells you *what* is on the bus; `TraceContext` tells
+you *where it came from*. A `Coordinator` or `CreateContext` with a
+non-null `tag` parameter automatically attaches a `TraceContext` to the
+coroutine context for every <Trigger /> `Trigger` and <Broadcast /> `Broadcast` call it makes:
+
+```kotlin
+Coordinator(switchBoard, lifecycleOwner, tag = "AuthCoordinator") {
+    ReactTo<LoginRequested> { /* ... */ }
+}
+
+// Compose-side
+CreateContext(appContext, tag = "CheckoutScreen") {
+    Node(initialState = CheckoutState()) { /* ... */ }
+}
+```
+
+Listen for the traces with `setTraceListener`:
+
+```kotlin
+switchBoard.setTraceListener { trace, point, clazz, data ->
+    Log.d("Trace", "[${trace.emitterTag}] $point ${clazz.simpleName}: $data")
+}
+```
+
+The listener fires with a `TraceContext`, an <Interceptor /> `InterceptPoint`, a
+`KClass`, and the value itself. `TraceContext` carries four fields:
+
+| Field           | Type      | Default               | Purpose                           |
+|-----------------|-----------|-----------------------|-----------------------------------|
+| `traceId`       | `String`  | monotonic counter     | Unique identifier for this trace  |
+| `parentTraceId` | `String?` | `null`                | Link to a parent trace            |
+| `emitterTag`    | `String?` | `null`                | Human-readable emitter label      |
+| `timestamp`     | `Long`    | `System.nanoTime()`   | Monotonic creation timestamp      |
+
+Crucially, `TraceContext` is a `CoroutineContext.Element` — it rides
+along the coroutine that called <Trigger /> `Trigger`, but it never enters the
+`SharedFlow` itself. Interceptors and consumers still see the raw value;
+only the trace listener has access to the context. That's why tracing
+is strictly additive: turning it on can't break a handler that doesn't
+know about it.
+
+## Opt-in cost
+
+Tracing is designed so the off-path pays nothing. A coordinator
+constructed without a `tag` never creates a `TraceContext`, so there's
+no allocation, no `withContext`, and no context-element lookup on every
+emission. On the listener side, the switchboard only calls
+`currentCoroutineContext()` when a trace listener is actually
+registered — the common case (no listener) skips the suspend intrinsic
+entirely.
+
+Tag the coordinators and screens where you'll actually want origin
+information — auth flows, navigation boundaries, anything where "who
+fired this?" is the first question you'd ask in a postmortem — and
+leave everything else untagged. You can always add tags later; the
+operation is local to a single call site.
+
+## Choosing between the three
+
+All three mechanisms coexist — they're independent slots on the
+switchboard, not alternatives. A practical setup during development
+looks like:
+
+- **`setGlobalLogger`** wired to a debug-drawer ring buffer so the
+  developer can scroll back through the last N events on any channel.
+- **`addLoggingInterceptors<AnalyticsEvent>`** for the production
+  analytics pipeline — it's type-scoped, so it doesn't pay for values
+  it doesn't care about, and it's the same mechanism that real analytics
+  interceptors use.
+- **`tag` + `setTraceListener`** on auth, navigation, and cross-feature
+  coordinators so the trace log can answer "*which* coordinator fired
+  this `NavigateTo`?" without needing to grep the codebase.
+
+In production you'd typically keep the trace listener and the
+type-scoped loggers, and gate the global logger behind a debug build
+flag or a hidden in-app toggle.
+
+## Next
+
+- [How Synapse Compares](/arch/comparisons/) — an honest comparison with MVVM, MVI, RIBs, and Circuit

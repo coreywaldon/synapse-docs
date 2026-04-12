@@ -1,0 +1,286 @@
+---
+title: Hilt Integration
+description: Wiring the SwitchBoard, ProviderRegistry, and coordinators through Hilt — single-module and multi-module apps.
+---
+
+import Broadcast from '../../../assets/navigator-icons/broadcast.svg';
+import Listen from '../../../assets/navigator-icons/listen.svg';
+import Trigger from '../../../assets/navigator-icons/trigger.svg';
+import React from '../../../assets/navigator-icons/react.svg';
+import Request from '../../../assets/navigator-icons/request.svg';
+import Provider from '../../../assets/navigator-icons/provider.svg';
+import Interceptor from '../../../assets/navigator-icons/interceptor.svg';
+
+Hilt is the recommended way to wire Synapse in an Android app. Most of the
+wiring is one-time boilerplate that lives in the `app` module: provide a
+`DefaultSwitchBoard` once, provide a `LifecycleOwner` for app-scope
+coordinators, and inject coordinators into `Application.onCreate` so
+they're alive before the first Activity runs. Everything else —
+providers, interceptors, Nodes — comes along for free through Hilt's
+normal injection rules.
+
+## What ships and what you wire
+
+Two artifacts pull their weight here:
+
+| Artifact            | Provides                                                                 |
+|---------------------|--------------------------------------------------------------------------|
+| `com.synapselib:arch`       | `DefaultSwitchBoard` (constructor `@Inject`), KSP processor for <Provider /> `@SynapseProvider`, qualifier annotations. |
+| `com.synapselib:arch-hilt`  | `SynapseProviderAggregatorModule` — merges per-module <Provider /> `ProviderRegistry` contributions into a single singleton. Needed for multi-module projects; harmless in single-module ones. |
+
+```kotlin
+// app/build.gradle.kts
+dependencies {
+    implementation("com.synapselib:arch:1.0.10")
+    implementation("com.synapselib:arch-hilt:1.0.10")
+    ksp("com.synapselib:arch:1.0.10")
+}
+```
+
+Feature modules only depend on `arch` (plus the KSP plugin). The
+aggregator lives exclusively in the app module, where the
+`SingletonComponent` is assembled.
+
+## Providing the SwitchBoard
+
+`DefaultSwitchBoard` has an `@Inject` constructor that takes a
+`CoroutineScope`, a <Provider /> `ProviderRegistry`, a worker `CoroutineContext`, and
+two timeout longs. Each non-registry dependency is tagged with a
+qualifier so you can provide them without fighting Hilt's type matching:
+
+```kotlin
+@Module
+@InstallIn(SingletonComponent::class)
+object SwitchBoardModule {
+
+    @Provides @SwitchBoardScope
+    fun provideSwitchBoardScope(): CoroutineScope =
+        CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    @Provides @SwitchBoardWorkerContext
+    fun provideWorkerContext(): CoroutineContext = Dispatchers.IO
+
+    @Provides @SwitchBoardStopTimeout
+    fun provideStopTimeoutMillis(): Long = 3_000
+
+    @Provides @SwitchBoardReplayExpiration
+    fun provideReplayExpirationMillis(): Long = 3_000
+}
+```
+
+That's all the module needs. `DefaultSwitchBoard` itself is annotated
+`@Singleton` via its `@Inject` constructor, so you don't write a
+`@Provides` for it — Hilt constructs one on demand and the
+<Provider /> `ProviderRegistry` is supplied by the aggregator module (or by the
+generated module in a single-module project).
+
+`SwitchBoardScope` is the long-lived coroutine scope that backs every
+provider job, every interceptor pipeline, and every channel collector.
+Tying it to `Dispatchers.IO` with a `SupervisorJob` matches the defaults
+inside the SwitchBoard and keeps a failing provider from taking the rest
+of the scope down with it.
+
+## Providing an app-scope `LifecycleOwner`
+
+Coordinators take a `LifecycleOwner` at construction and auto-dispose
+when it reaches `ON_DESTROY`. For app-scope coordinators — the ones that
+should live as long as the process — hand them
+`ProcessLifecycleOwner`, which never fires `ON_DESTROY` during normal
+execution:
+
+```kotlin
+@Module
+@InstallIn(SingletonComponent::class)
+object CoordinatorModule {
+    @Provides @Singleton
+    fun provideLifecycleOwner(): LifecycleOwner = ProcessLifecycleOwner.get()
+}
+```
+
+A coordinator that should live only while a particular screen is visible
+takes the Activity's or Fragment's `LifecycleOwner` instead — but that's
+a constructor-parameter decision, not a Hilt-module decision, so you'd
+scope it to `ActivityRetainedComponent` and inject it where the screen
+owns it.
+
+## The coordinator scaffold
+
+Concrete coordinators re-use a small `BaseCoordinator` interface that
+Hilt can hand around. An interface plus a default implementation keeps
+the concrete classes free of ceremony — the entire class body can be the
+setup lambda:
+
+```kotlin
+interface BaseCoordinator {
+    fun initialize(switchBoard: SwitchBoard)
+}
+
+class LifecycleCoordinator(
+    private val owner: LifecycleOwner,
+    private val setup: CoordinatorScope.() -> Unit,
+) : BaseCoordinator {
+    override fun initialize(switchBoard: SwitchBoard) {
+        Coordinator(switchBoard, owner) { setup() }
+    }
+}
+```
+
+Concrete coordinators pull their dependencies through `@Inject` and use
+Kotlin's `by` delegation to hand off `initialize` to
+`LifecycleCoordinator`:
+
+```kotlin
+@Singleton
+class CartCoordinator @Inject constructor(
+    api: CartApi,
+    lifecycleOwner: LifecycleOwner,
+) : BaseCoordinator by LifecycleCoordinator(lifecycleOwner, {
+    ReactTo<Cart.AddItem> { impulse ->
+        launch {
+            api.addItem(impulse.productId, impulse.quantity)
+            Trigger(Cart.ItemAdded(impulse.productId))
+        }
+    }
+})
+```
+
+The `api` constructor parameter is captured directly by the setup lambda
+— no `private val` needed unless the class body also touches it. The
+coordinator never has to override `initialize`, because the delegated
+impl already does.
+
+## Wiring coordinators in `Application.onCreate`
+
+Hilt only builds a class when something asks for it, and coordinators
+are no exception. To make sure every app-scope coordinator is alive
+before the first composition runs, inject them into `MainApplication`
+and call `initialize` in `onCreate`:
+
+```kotlin
+@HiltAndroidApp
+class MainApplication : Application() {
+
+    @Inject lateinit var switchBoard: DefaultSwitchBoard
+
+    @Inject lateinit var cartCoordinator: CartCoordinator
+    @Inject lateinit var authCoordinator: AuthCoordinator
+    @Inject lateinit var productCoordinator: ProductCoordinator
+
+    override fun onCreate() {
+        super.onCreate()
+        cartCoordinator.initialize(switchBoard)
+        authCoordinator.initialize(switchBoard)
+        productCoordinator.initialize(switchBoard)
+    }
+}
+```
+
+No teardown hook is needed. The coordinators were constructed with
+`ProcessLifecycleOwner`, so their scopes tear down when the process
+dies, which is the lifetime you want. Don't override `onTerminate`
+either — it's not called on production devices and would only obscure
+the ownership model.
+
+If the list of coordinators grows enough that this feels unwieldy,
+inject a `Set<BaseCoordinator>` through Hilt multibindings (`@IntoSet`
+on each `@Provides`) and loop over it. That's a pure-Hilt refactor and
+doesn't affect anything Synapse-side.
+
+## Handing the switchboard to Compose
+
+Nodes find the switchboard through a `CompositionLocal`, so a single
+`CompositionLocalProvider` at the root of the composition is enough to
+make <Request /> `Request`, <Trigger /> `Trigger`, <Broadcast /> `Broadcast`, <Listen /> `ListenFor`, and <React /> `ReactTo` work
+everywhere inside it:
+
+```kotlin
+@AndroidEntryPoint
+class MainActivity : ComponentActivity() {
+
+    @Inject lateinit var switchBoard: DefaultSwitchBoard
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContent {
+            CompositionLocalProvider(LocalSwitchBoard provides switchBoard) {
+                AppTheme { MarketApp() }
+            }
+        }
+    }
+}
+```
+
+A Node that asks for `LocalSwitchBoard.current` without a provider above
+it fails fast in debug with a descriptive error — the composable DSL
+won't silently no-op if the wiring is missing.
+
+## Multi-module providers
+
+In a project with one module, the KSP processor generates a single
+`SynapseProviderModule_App` that provides a <Provider /> `ProviderRegistry` directly.
+In a project with two or more modules that both have <Provider /> `@SynapseProvider`
+classes, two such modules would collide on the same <Provider /> `ProviderRegistry`
+binding and Hilt would refuse to compile.
+
+`arch-hilt` fixes that by having each module's generated code contribute
+its registry into a multibinding set instead:
+
+```kotlin
+// Generated per feature module
+@Module
+@InstallIn(SingletonComponent::class)
+object SynapseProviderModule_FeatureAuth {
+    @Provides @IntoSet
+    fun provideContribution(
+        tokenProvider: javax.inject.Provider<TokenProvider>,
+    ): ProviderRegistryContribution = ProviderRegistryContribution(
+        ProviderRegistry.Builder()
+            .register(
+                impulseType = FetchCachedToken::class,
+                needClass = AuthToken::class.java,
+                factory = ProviderFactory { tokenProvider.get() },
+            )
+            .build()
+    )
+}
+```
+
+`SynapseProviderAggregatorModule` (shipped by `arch-hilt`) collects the
+full `Set<ProviderRegistryContribution>`, merges them with
+<Provider /> `ProviderRegistry.Builder.mergeFrom`, and exposes the result as the
+single `@Singleton ProviderRegistry` that `DefaultSwitchBoard` injects.
+
+To make each module's generated module a unique name, pass
+`synapse.moduleName` to KSP in that module's build file:
+
+```kotlin
+// feature-auth/build.gradle.kts
+plugins { id("com.google.devtools.ksp") }
+
+ksp {
+    arg("synapse.moduleName", "FeatureAuth")
+}
+```
+
+Without the arg, every module's KSP output would land in
+`SynapseProviderModule_App` and the classes would clobber each other at
+link time. With the arg, each module's contribution lives in its own
+file and all of them flow through the aggregator at runtime. If two
+modules genuinely register a provider for the same `DataImpulse` type,
+the aggregator fails loudly at startup with a clear error — a bug you
+want to notice early, not silently paper over.
+
+## Testing
+
+Hilt and `arch-test` compose cleanly, but you rarely need both at once.
+`SynapseTestRule` from `arch-test` stands up its own real `SwitchBoard`
+without going through Hilt — so the pattern for a coordinator test is
+"construct the coordinator by hand with fake dependencies and the
+rule's `lifecycleOwner`", not "spin up a Hilt test component". See the
+[Testing](/arch/testing/) page for the full shape. The arch-hilt README covers the
+`@UninstallModules` + `@BindValue` escape hatch for tests that really
+do need to swap a production module at the Hilt level.
+
+## Next
+
+- [Observability](/arch/observability/) — global logging, type-specific logging, and trace contexts
