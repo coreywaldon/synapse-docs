@@ -60,18 +60,14 @@ IntelliJ platform and the Kotlin plugin, not on Android-specific APIs.
 
 ## Installation
 
-Navigator is distributed as a standalone IntelliJ plugin. Build it from
-source in the `synapse-plugin` module:
+1. Download the latest zip from the
+   [synapse-plugin releases](https://github.com/coreywaldon/synapse-plugin/releases) page.
+2. In your IDE, open **Settings > Plugins > ⚙ > Install Plugin from Disk…**
+   and select the downloaded zip.
+3. Restart when prompted.
 
-```bash
-./gradlew :synapse-plugin:buildPlugin
-```
-
-That produces a zip under `synapse-plugin/build/distributions/`. Install
-it in your IDE via **Settings > Plugins > ⚙ > Install Plugin from
-Disk…** and restart when prompted. Navigator registers itself as
-`Synapse Navigator` in the plugin list and begins scanning on the next
-project open.
+Navigator registers itself as `Synapse Navigator` in the plugin list
+and begins scanning on the next project open.
 
 ## First-time setup
 
