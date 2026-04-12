@@ -39,6 +39,7 @@ export default defineConfig({
 						{ label: 'Introduction', slug: 'getting-started/introduction' },
 						{ label: 'Installation', slug: 'getting-started/installation' },
 						{ label: 'Quick Start', slug: 'getting-started/quick-start' },
+						{ label: 'Versions', slug: 'getting-started/versions' },
 					],
 				},
 				{
@@ -50,10 +51,12 @@ export default defineConfig({
 						{ label: 'Providers', slug: 'arch/providers' },
 						{ label: 'Interceptors', slug: 'arch/interceptors' },
 						{ label: 'Organizing Impulses & State', slug: 'arch/organizing' },
-						{ label: 'Testing', slug: 'arch/testing' },
+						{ label: 'SwitchBoard', slug: 'arch/switchboard' },
 						{ label: 'Hilt Integration', slug: 'arch/hilt' },
 						{ label: 'Observability', slug: 'arch/observability' },
+						{ label: 'Testing', slug: 'arch/testing' },
 						{ label: 'How Synapse Compares', slug: 'arch/comparisons' },
+						{ label: 'Troubleshooting', slug: 'arch/troubleshooting' },
 					],
 				},
 				{

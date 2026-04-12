@@ -1,0 +1,167 @@
+---
+title: Troubleshooting
+description: Common issues, error messages, and how to fix them.
+---
+
+import Broadcast from '../../../assets/navigator-icons/broadcast.svg';
+import Listen from '../../../assets/navigator-icons/listen.svg';
+import Trigger from '../../../assets/navigator-icons/trigger.svg';
+import React from '../../../assets/navigator-icons/react.svg';
+import Request from '../../../assets/navigator-icons/request.svg';
+import Provider from '../../../assets/navigator-icons/provider.svg';
+import Interceptor from '../../../assets/navigator-icons/interceptor.svg';
+
+## My listener never receives anything
+
+**Symptom:** <Listen /> `ListenFor<T>` or <React /> `ReactTo<T>` handler never fires.
+
+**Likely causes:**
+
+1. **Type mismatch.** The type argument on the producer and consumer must
+   match exactly. `Broadcast<SessionState>` and `ListenFor<SessionStatus>`
+   are two different channels even if the classes have the same fields.
+
+2. **Reaction fired before the collector was active.** Reactions have
+   replay 0 — if the <Trigger /> `Trigger` fires before the <React /> `ReactTo` subscription
+   is collecting, the event is gone. If you need late subscribers to see
+   the value, use the State channel (<Broadcast /> `Broadcast` + <Listen /> `ListenFor`) instead.
+
+3. **Lifecycle not resumed.** In tests, the `LifecycleOwner` must be moved
+   to at least `RESUMED` before handlers will collect. If you're using
+   `SynapseTestRule` this is handled for you; if you're wiring manually,
+   call `lifecycleOwner.handleLifecycleEvent(Lifecycle.Event.ON_RESUME)`.
+
+## `NoProviderException`
+
+```
+No provider registered for impulse type: FetchProduct.
+Annotate a Provider implementation with @Provider for this impulse type.
+```
+
+**Cause:** A <Request /> `Request(FetchProduct(...))` was dispatched but no
+<Provider /> `@SynapseProvider` class is registered for `FetchProduct`.
+
+**Fixes:**
+
+- Verify a provider class annotated <Provider /> `@SynapseProvider` exists for this
+  impulse type and extends `Provider<FetchProduct, Product>`.
+- In multi-module projects, make sure the module containing the provider
+  applies the `arch-hilt` KSP processor and its generated
+  `ProviderRegistryContribution` is picked up by the Hilt graph. See
+  [Hilt Integration](/arch/hilt/).
+
+## `No SwitchBoard provided!`
+
+```
+No SwitchBoard provided! Wrap your app in ProvideSwitchBoard.
+```
+
+**Cause:** A composable tried to access `LocalSwitchBoard.current` but no
+`CompositionLocalProvider` is above it in the tree.
+
+**Fix:** Wrap your root composable in a `CompositionLocalProvider` that
+supplies the `SwitchBoard`:
+
+```kotlin
+CompositionLocalProvider(LocalSwitchBoard provides switchBoard) {
+    App()
+}
+```
+
+This is typically done in your `Activity.onCreate` or `Application`-level
+setup. See [Compose DSL](/arch/compose-dsl/) and [Hilt Integration](/arch/hilt/).
+
+## Duplicate provider registration
+
+```
+Duplicate provider registration for impulse type: FetchProduct.
+Each DataImpulse type must have exactly one provider.
+```
+
+**Cause:** Two <Provider /> `@SynapseProvider` classes claim the same `DataImpulse`
+type, or the same provider is registered twice during
+`ProviderRegistry` building.
+
+**Fixes:**
+
+- Search for all classes extending `Provider<FetchProduct, ...>` — there
+  should be exactly one.
+- In multi-module builds, make sure two modules don't both define a
+  provider for the same impulse. The `ProviderRegistry` merge step during
+  Hilt aggregation will throw if it detects a collision.
+
+## Request returns `DataState.Error` unexpectedly
+
+A request can surface an error for two reasons:
+
+1. **The provider threw.** The exception is wrapped in
+   `DataState.Error(cause)`. Check the `cause` for the underlying issue.
+   If the provider had a previous successful result, `staleData` carries
+   the last-known-good value so the UI can display it alongside the error.
+
+2. **Concurrency limit reached.** If the `ProviderManager` has a
+   configured concurrency cap and it's full, new requests receive
+   `DataState.Error` with a `ProviderConcurrencyException`. This is rare
+   in default configurations (the limit is unbounded by default).
+
+## Interceptor not running
+
+**Likely causes:**
+
+1. **Wrong intercept point.** Each interceptor registers at a specific
+   channel and direction — `STATE_UPSTREAM`, `REACTION_DOWNSTREAM`, etc.
+   Make sure the point matches the traffic you're trying to intercept.
+
+2. **Registration happened after the event.** Interceptors only see
+   traffic that flows after they're installed. In tests, install captures
+   *before* the action under test.
+
+3. **Type doesn't match.** The interceptor's type argument must match or
+   be a supertype of the data flowing through the channel. An
+   <Interceptor /> `Intercept<TokenBearer>` won't catch a type that doesn't implement
+   `TokenBearer`.
+
+4. **Registration was disposed.** `addInterceptor` returns a
+   `Registration` handle. If something called `registration.unregister()`,
+   the interceptor is gone.
+
+## Test hangs or times out
+
+**Likely causes:**
+
+1. **Lifecycle not advanced.** Coordinator and Node handlers gate on
+   lifecycle state. If the test's `LifecycleOwner` is stuck at
+   `INITIALIZED`, subscriptions never start collecting. Move it to
+   `RESUMED`.
+
+2. **Dispatcher not set.** Without `Dispatchers.setMain(testDispatcher)`,
+   coroutines launched on `Dispatchers.Main` hang in a unit test.
+   `SynapseTestRule` handles this automatically.
+
+3. **Late collection on SharedFlow.** If you're manually collecting a
+   `SharedFlow` after the value was emitted, the collector blocks forever
+   waiting. Use `SynapseTestRule`'s `onImpulse` / `onState` capture
+   helpers, which install upstream interceptors before the action.
+
+## Same request fires twice / provider runs twice
+
+<Request /> `Request` deduplicates by **structural equality** of the impulse. If two
+call sites dispatch `FetchProduct(id = "abc")`, they share the same
+provider job and `DataState` flow. But `FetchProduct(id = "abc")` and
+`FetchProduct(id = "def")` are different impulses and each gets its own
+provider run.
+
+If you're seeing duplicate runs for what you think is the same impulse,
+check that the impulse's `equals()` / `hashCode()` — typically via
+`data class` — covers all fields you expect. An extra field with a
+different value means a different impulse.
+
+## Coordinator disposes before work finishes
+
+Coordinators are scoped to a `LifecycleOwner`. When that owner reaches
+`ON_DESTROY`, the coordinator's `CoroutineScope` is canceled and all
+in-flight work stops. This is by design — it prevents leaks.
+
+If you need work to survive a configuration change, scope the
+coordinator to the `Activity` or `Application` lifecycle rather than a
+`Fragment`. See [Coordinators](/arch/coordinators/).

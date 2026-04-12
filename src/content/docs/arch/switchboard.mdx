@@ -1,0 +1,147 @@
+---
+title: SwitchBoard
+description: The central bus — how it routes impulses, manages flows, and integrates with your DI container.
+---
+
+import Broadcast from '../../../assets/navigator-icons/broadcast.svg';
+import Listen from '../../../assets/navigator-icons/listen.svg';
+import Trigger from '../../../assets/navigator-icons/trigger.svg';
+import React from '../../../assets/navigator-icons/react.svg';
+import Request from '../../../assets/navigator-icons/request.svg';
+import Provider from '../../../assets/navigator-icons/provider.svg';
+import Interceptor from '../../../assets/navigator-icons/interceptor.svg';
+
+Every Synapse app has a single `SwitchBoard`. It is the only shared
+object in the architecture — every Node, Coordinator, and Provider talks
+to the rest of the app through it. Nothing else holds a reference to
+anything else.
+
+## Interface and implementation
+
+`SwitchBoard` is an interface. The concrete class you use at runtime is
+`DefaultSwitchBoard`, which is designed for constructor injection via
+Hilt (or any DI container that can satisfy its parameters).
+
+```kotlin
+class DefaultSwitchBoard @Inject constructor(
+    @SwitchBoardScope        scope: CoroutineScope,
+    providerRegistry:        ProviderRegistry,
+    @SwitchBoardWorkerContext workerContext: CoroutineContext = Dispatchers.IO,
+    @SwitchBoardStopTimeout  stopTimeoutMillis: Long  = 3_000,
+    @SwitchBoardReplayExpiration replayExpirationMillis: Long = 3_000,
+) : SwitchBoard
+```
+
+| Parameter                | Purpose                                                                                  | Default            |
+|--------------------------|------------------------------------------------------------------------------------------|--------------------|
+| `scope`                  | Parent `CoroutineScope`. Canceling it tears down every flow the bus manages.             | *(required)*       |
+| `providerRegistry`       | Immutable registry mapping each `DataImpulse` type to its provider factory.              | *(required)*       |
+| `workerContext`           | `CoroutineContext` for provider work (the "IO" side of request handling).                 | `Dispatchers.IO`   |
+| `stopTimeoutMillis`      | How long a shared flow keeps emitting after its last subscriber disconnects.              | `3000` (3 s)       |
+| `replayExpirationMillis` | How long a replay cache is retained after all subscribers disconnect.                     | `3000` (3 s)       |
+
+## How routing works
+
+Internally, the SwitchBoard maintains a `ConcurrentHashMap` per channel:
+
+- **State** — `MutableSharedFlow` per type, `replay = 1`,
+  `onBufferOverflow = DROP_OLDEST`. A <Broadcast /> `Broadcast` emits into the flow; a
+  <Listen /> `ListenFor` collects from the downstream-intercepted view.
+- **Reaction** — `MutableSharedFlow` per type, `replay = 0`,
+  `extraBufferCapacity = 64`, `onBufferOverflow = DROP_OLDEST`. A
+  <Trigger /> `Trigger` emits; a <React /> `ReactTo` collects. Because replay is zero, only
+  active collectors see events.
+- **Request** — A <Request /> `Request` is handed to the `ProviderManager`, which
+  resolves the impulse type to a `ProviderFactory`, creates a child
+  `SupervisorJob` scoped to the worker context, runs the provider's
+  `produce` function, and publishes `DataState` transitions through a
+  `SharedFlow` with `replay = 1`.
+
+Flows are created lazily on first access — a type that is never
+broadcast or triggered allocates nothing.
+
+## Interceptor pipeline
+
+Every emission passes through the interceptor pipeline before reaching
+consumers. The SwitchBoard holds an `InterceptorRegistry` per intercept
+point (six in total — three channels times two directions). When a value
+is emitted:
+
+1. **Upstream interceptors** run in priority order on the producing side
+   (e.g. `STATE_UPSTREAM` fires during <Broadcast /> `Broadcast`).
+2. The value enters the shared flow.
+3. **Downstream interceptors** run in priority order on the consuming
+   side (e.g. `STATE_DOWNSTREAM` fires when <Listen /> `ListenFor` collects).
+
+Interceptor registries use fast-path caching with version stamps, so
+the common case (no interceptors on a given type) adds no allocation.
+
+## Sharing strategy
+
+Downstream flows are shared via `SharingStarted.WhileSubscribed`:
+
+- Emission continues for `stopTimeoutMillis` after the last subscriber
+  disconnects, avoiding unnecessary restarts during brief configuration
+  changes.
+- The replay cache is retained for `replayExpirationMillis` after
+  emission stops, so a subscriber that reconnects quickly still sees the
+  latest value without a re-fetch.
+
+For tests, `setEagerSharing()` switches to `SharingStarted.Eagerly` so
+flows are hot from the start and values are never missed due to timing.
+
+## Thread safety
+
+All internal maps are `ConcurrentHashMap`. All flows (`MutableSharedFlow`,
+`SharedFlow`) are thread-safe by Kotlin coroutines contract. The global
+logger and trace listener are stored in `AtomicReference` fields. In
+short: every member of `SwitchBoard` is safe to call from any coroutine
+or thread.
+
+## Provider routing
+
+Request routing is delegated to `ProviderManager`:
+
+1. Look up the impulse type in the `ProviderRegistry`.
+2. If an active job for a **structurally equal** impulse already exists,
+   share its `DataState` flow (deduplication).
+3. Otherwise, create a new child scope (`SupervisorJob` +
+   `workerContext`), instantiate the provider via its factory, and
+   collect the provider's `produce` flow.
+4. Each `DataState` transition (`Loading`, `Success`, `Error`) is
+   published through the shared flow so every subscriber sees the same
+   lifecycle.
+
+`ProviderRegistry` is immutable after `build()`. In multi-module Hilt
+projects, each module contributes a `ProviderRegistryContribution` via
+`@IntoSet`, and the `SynapseProviderAggregatorModule` merges them into
+a single registry at app startup. See [Hilt Integration](/arch/hilt/).
+
+## Lifecycle
+
+The SwitchBoard itself has no `dispose()` method. Its lifetime is
+controlled entirely by the `CoroutineScope` you inject:
+
+- **App-scoped** (typical) — lives for the process. Flows survive
+  configuration changes. State replay works across activity recreations.
+- **Test-scoped** — `SynapseTestRule` creates a fresh scope per test and
+  cancels it on teardown, so nothing leaks between tests.
+
+When the scope is canceled, all shared flows stop, all active provider
+jobs are canceled, and all interceptor pipelines shut down. No manual
+cleanup is needed.
+
+## Compose integration
+
+`LocalSwitchBoard` is a `CompositionLocal` that makes the bus available
+to any composable in the tree:
+
+```kotlin
+CompositionLocalProvider(LocalSwitchBoard provides switchBoard) {
+    App()
+}
+```
+
+`CreateContext` reads from `LocalSwitchBoard` automatically — you don't
+interact with the `CompositionLocal` directly after the root setup. See
+[Compose DSL](/arch/compose-dsl/).
