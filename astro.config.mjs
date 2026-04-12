@@ -54,6 +54,7 @@ export default defineConfig({
 						{ label: 'SwitchBoard', slug: 'arch/switchboard' },
 						{ label: 'Hilt Integration', slug: 'arch/hilt' },
 						{ label: 'Observability', slug: 'arch/observability' },
+						{ label: 'Performance', slug: 'arch/performance' },
 						{ label: 'Testing', slug: 'arch/testing' },
 						{ label: 'How Synapse Compares', slug: 'arch/comparisons' },
 						{ label: 'Troubleshooting', slug: 'arch/troubleshooting' },
