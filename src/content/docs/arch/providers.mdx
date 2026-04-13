@@ -304,15 +304,24 @@ matches what's actually happening.
 
 ## Freshness windows
 
+A one-shot provider's job is removed from `activeJobs` the moment its
+last collector leaves. The next <Request /> `Request(FetchProduct(id))`
+runs `produce` from scratch, even if the data was fetched thirty seconds
+ago — on a screen that remounts often (back navigation, tab switching,
+bottom-nav), the same endpoint fires on every visit.
+
 Bus dedup only covers *overlapping* requests — two callers firing the
 same impulse while the fetch is in flight share one job. Once that job
-completes, the next <Request /> `Request` starts from scratch. A
-<Provider /> `Provider` never caches its own results.
+completes, the next <Request /> `Request` starts from scratch; a
+<Provider /> `Provider` never caches its own results. For data that's
+safe to reuse for a bounded window — a user profile, a feature config,
+a catalog page — use `FreshnessRegistry` to mint a stable token for
+that window and key a cache by it.
 
-For data that's expensive to refetch but safe to reuse for a bounded
-window — a user profile, a feature config, a catalog page — use
-`FreshnessRegistry` to mint a stable token for that window and key a
-cache by it.
+This is an opt-in convention, not a framework concern. For cheap,
+idempotent, infrequent requests, skip it; the indirection earns
+nothing. Reach for it when remount traffic would otherwise refire the
+same fetch.
 
 ### `FreshnessKey` and `FreshnessRegistry`
 
@@ -345,7 +354,7 @@ durations are.
 
 ### Keying a cache by token
 
-The token is opaque on purpose. Its only contract is *stable within a
+The token is deliberately opaque. Its only contract is *stable within a
 window, different across windows*, which makes it a safe component of a
 cache key in whatever storage the provider sits in front of:
 
@@ -374,12 +383,17 @@ class ProductCache @Inject constructor() {
         token: FreshnessToken,
         load: () -> Product,
     ): Product = entries.getOrPut(id to token, load)
+    fun put(id: String, token: FreshnessToken, product: Product) { entries[id to token] = product }
 }
 ```
 
-Within the window every fetch hits the cache. Once the window rolls
-over, the token changes, the `(id, token)` pair misses, and
-`api.getProduct` runs once — its result then serves the next window.
+Cache hits and misses ride on `FreshnessToken` equality — a primitive
+`Long` compare, since `FreshnessToken` is a `@JvmInline value class`.
+Every new bucket gets a `Long` the registry has never used before, so
+keys that were equal moments ago compare unequal the instant the window
+rolls over. Within the window every fetch hits the cache; once the
+window rolls over, the `(id, token)` pair misses, and `api.getProduct`
+runs once — its result then serves the next window.
 
 Bus dedup compounds this: if three callers simultaneously request the
 same product on a cold cache, they share a single `produce` run and only
@@ -390,7 +404,7 @@ one `api.getProduct` call is made.
 Pick the duration from how stale the *user* will tolerate the data
 being, not from how expensive the fetch is:
 
-- **Seconds** for things that should feel live (cart badges, order status).
+- **Seconds** for things that should feel live (notification counts, presence indicators).
 - **Minutes** for things that are effectively static within a session (catalog entries, profile).
 - **Hours** for things that only change on explicit user action (feature flags, saved preferences).
 
@@ -404,8 +418,8 @@ Per-type is the right default. Each registry is cheap — a `HashMap`, a
 min-heap, and a counter — and splitting gives you an independent
 `maxSize` budget, targeted `clear()`, and type-safe DI. Mixing unrelated
 keys in a single pool lets a burst of product lookups evict your
-feature-flag buckets, because the heap evicts by expiry and knows
-nothing about which concern a key belongs to.
+feature-flag buckets, because the heap evicts by expiry and is
+indifferent to which concern each key serves.
 
 Merge registries when a set of key types share both a duration profile
 and an invalidation trigger — everything user-scoped that should drop on
@@ -426,13 +440,91 @@ FreshnessRegistry<UserScopedKey>(maxSize = 1_000)
 Past that, an app-wide registry tends to blur eviction and invalidation
 semantics without saving much.
 
-### Invalidation
+### Escape hatches
 
-`FreshnessRegistry.clear()` drops every bucket regardless of expiry.
-Call it on sign-out, tenant switch, or any transition that should
-invalidate every cached view at once. For targeted invalidation, evict
-from the downstream cache directly — the token itself carries no state
-beyond its window.
+A cache serves the same value for the entire window — wrong behavior
+when the user *asks* for fresh data, or when something upstream just
+changed and you know the cache is stale. Three hatches cover the common
+cases.
+
+**Per-request override.** Add a `refresh` flag to the impulse and let
+the provider skip the cache read when it's set:
+
+```kotlin
+data class FetchProduct(
+    val productId: String,
+    val refresh: Boolean = false,
+) : DataImpulse<Product>()
+
+override fun ProviderScope.produce(impulse: FetchProduct): Flow<Product> = flow {
+    val token = freshness.get(ProductBucket(impulse.productId))
+    val product = if (impulse.refresh) {
+        api.getProduct(impulse.productId).also { cache.put(impulse.productId, token, it) }
+    } else {
+        cache.getOrPut(impulse.productId, token) { api.getProduct(impulse.productId) }
+    }
+    emit(product)
+}
+```
+
+Because `refresh` is part of the impulse, `FetchProduct(id, refresh = true)`
+is structurally *not* equal to a passive `FetchProduct(id)` — the two
+won't dedup, which is the behavior you want for pull-to-refresh: the
+user's explicit refresh shouldn't piggyback on an in-flight background
+fetch. The refresh result lands in the cache under the current token,
+so the next passive caller reads it.
+
+**Targeted invalidation.** After a write succeeds, the cached entry is
+stale but the next reader can refetch. Expose an invalidate hook on the
+cache and call it from wherever the mutation is handled — a Reaction
+handler for `ProductUpdated`, say:
+
+```kotlin
+@Singleton
+class ProductCache @Inject constructor() {
+    private val entries = ConcurrentHashMap<Pair<String, FreshnessToken>, Product>()
+    fun invalidate(productId: String) = entries.keys.removeAll { it.first == productId }
+    // getOrPut, put as before
+}
+```
+
+The next <Request /> `Request(FetchProduct(id))` misses the cache,
+refetches, and the refreshed value serves readers for the rest of the
+window.
+
+**Wholesale clear.** `FreshnessRegistry.clear()` drops every bucket
+regardless of expiry, and clearing the downstream cache alongside it
+resets every entry. Appropriate for sign-out, tenant switch, or any
+transition that should invalidate every cached view at once — heavy for
+anything smaller.
+
+### Testing with an injected clock
+
+`FreshnessRegistry`'s first constructor parameter is a
+`TimeSource.WithComparableMarks`, defaulting to `TimeSource.Monotonic`.
+Hand it a `kotlin.time.TestTimeSource` in tests and advance the clock
+manually to exercise window boundaries without wall-clock sleeps:
+
+```kotlin
+@Test
+fun `token rotates once the window elapses`() {
+    val time = TestTimeSource()
+    val registry = FreshnessRegistry<ProductBucket>(timeSource = time)
+    val key = ProductBucket("sku-42")
+
+    val first = registry.get(key)
+    time += 4.minutes
+    assertEquals(first, registry.get(key))      // same window
+
+    time += 2.minutes
+    assertNotEquals(first, registry.get(key))   // rolled over
+}
+```
+
+For provider-level tests that go through `SynapseTestRule`, construct
+the `FreshnessRegistry` in the test's Hilt replacement module with a
+`TestTimeSource` and drive it the same way — the provider sees the same
+token semantics production code does, just on a clock you control.
 
 ## Testing
 
