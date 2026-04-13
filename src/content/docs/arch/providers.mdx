@@ -302,6 +302,138 @@ that when you do need to reason about dedup, cleanup ordering, or the
 "last successful value" stash on `DataState.Error`, the mental model
 matches what's actually happening.
 
+## Freshness windows
+
+Bus dedup only covers *overlapping* requests — two callers firing the
+same impulse while the fetch is in flight share one job. Once that job
+completes, the next <Request /> `Request` starts from scratch. A
+<Provider /> `Provider` never caches its own results.
+
+For data that's expensive to refetch but safe to reuse for a bounded
+window — a user profile, a feature config, a catalog page — use
+`FreshnessRegistry` to mint a stable token for that window and key a
+cache by it.
+
+### `FreshnessKey` and `FreshnessRegistry`
+
+A `FreshnessKey` binds a logical cache entry to how long it stays fresh:
+
+```kotlin
+data class ProductBucket(val productId: String) : FreshnessKey {
+    override val duration: Duration = 5.minutes
+}
+```
+
+Hold a `FreshnessRegistry<ProductBucket>` as a singleton. Every call to
+`get(key)` within the same 5-minute window returns the identical
+`FreshnessToken`; the next call after the window opens a new bucket and
+issues a new token.
+
+```kotlin
+@Module
+@InstallIn(SingletonComponent::class)
+object FreshnessModule {
+    @Provides @Singleton
+    fun productFreshness() = FreshnessRegistry<ProductBucket>(maxSize = 500)
+}
+```
+
+`maxSize` caps the registry for user-generated key spaces. When the map
+is full, inserting a new key evicts the bucket nearest to expiring — a
+min-heap keeps that lookup O(log n) regardless of how mixed the
+durations are.
+
+### Keying a cache by token
+
+The token is opaque on purpose. Its only contract is *stable within a
+window, different across windows*, which makes it a safe component of a
+cache key in whatever storage the provider sits in front of:
+
+```kotlin
+@SynapseProvider
+class ProductDetailProvider @Inject constructor(
+    private val api: MarketApi,
+    private val freshness: FreshnessRegistry<ProductBucket>,
+    private val cache: ProductCache,
+) : Provider<FetchProduct, Product>() {
+    override fun ProviderScope.produce(impulse: FetchProduct): Flow<Product> = flow {
+        val token = freshness.get(ProductBucket(impulse.productId))
+        emit(cache.getOrPut(impulse.productId, token) { api.getProduct(impulse.productId) })
+    }
+}
+```
+
+Where `ProductCache` is a thin memory map:
+
+```kotlin
+@Singleton
+class ProductCache @Inject constructor() {
+    private val entries = ConcurrentHashMap<Pair<String, FreshnessToken>, Product>()
+    inline fun getOrPut(
+        id: String,
+        token: FreshnessToken,
+        load: () -> Product,
+    ): Product = entries.getOrPut(id to token, load)
+}
+```
+
+Within the window every fetch hits the cache. Once the window rolls
+over, the token changes, the `(id, token)` pair misses, and
+`api.getProduct` runs once — its result then serves the next window.
+
+Bus dedup compounds this: if three callers simultaneously request the
+same product on a cold cache, they share a single `produce` run and only
+one `api.getProduct` call is made.
+
+### Choosing a duration
+
+Pick the duration from how stale the *user* will tolerate the data
+being, not from how expensive the fetch is:
+
+- **Seconds** for things that should feel live (cart badges, order status).
+- **Minutes** for things that are effectively static within a session (catalog entries, profile).
+- **Hours** for things that only change on explicit user action (feature flags, saved preferences).
+
+Calls fired more often than the duration coalesce onto the cache; calls
+fired less often always refetch, so a long duration on an infrequent
+request buys nothing.
+
+### One registry per key type, or one per scope?
+
+Per-type is the right default. Each registry is cheap — a `HashMap`, a
+min-heap, and a counter — and splitting gives you an independent
+`maxSize` budget, targeted `clear()`, and type-safe DI. Mixing unrelated
+keys in a single pool lets a burst of product lookups evict your
+feature-flag buckets, because the heap evicts by expiry and knows
+nothing about which concern a key belongs to.
+
+Merge registries when a set of key types share both a duration profile
+and an invalidation trigger — everything user-scoped that should drop on
+sign-out, say. Define a sealed parent and let `FreshnessRegistry` take
+the parent type:
+
+```kotlin
+sealed interface UserScopedKey : FreshnessKey {
+    data class Profile(val userId: String) : UserScopedKey { override val duration = 5.minutes }
+    data class Cart(val userId: String)    : UserScopedKey { override val duration = 30.seconds }
+    data class Orders(val userId: String)  : UserScopedKey { override val duration = 2.minutes }
+}
+
+// One registry, one clear() call on sign-out.
+FreshnessRegistry<UserScopedKey>(maxSize = 1_000)
+```
+
+Past that, an app-wide registry tends to blur eviction and invalidation
+semantics without saving much.
+
+### Invalidation
+
+`FreshnessRegistry.clear()` drops every bucket regardless of expiry.
+Call it on sign-out, tenant switch, or any transition that should
+invalidate every cached view at once. For targeted invalidation, evict
+from the downstream cache directly — the token itself carries no state
+beyond its window.
+
 ## Testing
 
 The `arch-test` module ships a `SynapseTestRule` that stands up a real
