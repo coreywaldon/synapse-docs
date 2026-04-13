@@ -54,16 +54,22 @@ CompositionLocalProvider(LocalSwitchBoard provides mySwitchBoard) {
 }
 ```
 
-It then builds a `ContextScope(context, switchboard, tag)` via
-`remember(context, switchboard, tag)`, so the scope instance is retained
-across recompositions and only replaced when the context value, the
-switchboard, or the tag changes identity. There are no side effects — the
-whole composable is just `scope.block()`.
+It captures a `rememberCoroutineScope()` once per `CreateContext` call,
+then builds a `ContextScope(context, switchboard, coroutineScope, tag)`
+via `remember(context, switchboard, tag)`, so the scope instance is
+retained across recompositions and only replaced when the context value,
+the switchboard, or the tag changes identity. There are no side effects
+— the whole composable is just `scope.block()`.
 
-The `ContextScope` itself is a plain class holding three fields: `context`,
-`switchboard`, and `tag`. Its only suspend members are <Trigger /> `Trigger` and
-<Broadcast /> `Broadcast`, which forward to the switchboard and optionally wrap the call
-in a `TraceContext` when `tag` is non-null. When `tag` is null there is no
+The `ContextScope` itself is a plain class holding four fields:
+`context`, `switchboard`, `coroutineScope`, and `tag`. The
+`coroutineScope` is pulled from `rememberCoroutineScope()` inside
+`CreateContext`, so its lifetime matches the enclosing composition — it
+cancels automatically when `CreateContext` leaves the tree, and every
+child `ContextScope` extension shares the same instance. Its only
+suspend members are <Trigger /> `Trigger` and <Broadcast /> `Broadcast`,
+which forward to the switchboard and optionally wrap the call in a
+`TraceContext` when `tag` is non-null. When `tag` is null there is no
 tracing overhead.
 
 ### Nested contexts
@@ -228,11 +234,9 @@ out of smaller composables without prop-drilling services.
 ```kotlin
 @Composable
 fun ContextScope<ScreenContext>.TaskItem(task: Task, modifier: Modifier = Modifier) {
-    val scope = rememberCoroutineScope()
-
     Card(
         modifier = modifier.clickable {
-            scope.launch { Trigger(TaskUpdated(task.copy(done = !task.done))) }
+            coroutineScope.launch { Trigger(TaskUpdated(task.copy(done = !task.done))) }
         }
     ) {
         Text(task.title)
@@ -240,16 +244,19 @@ fun ContextScope<ScreenContext>.TaskItem(task: Task, modifier: Modifier = Modifi
 }
 ```
 
-A `ContextScope<T>` extension has access to `context`, <Trigger /> `Trigger`, and
-<Broadcast /> `Broadcast` directly via the receiver — but **not** `scope`. A coroutine
-scope is a property of `NodeScope`, not `ContextScope`. Since <Trigger /> `Trigger` and
-<Broadcast /> `Broadcast` are suspend functions, a `ContextScope` extension that needs to
-call them from a click handler or callback must grab its own with
-`rememberCoroutineScope()`.
+A `ContextScope<T>` extension has access to `context`, `coroutineScope`,
+<Trigger /> `Trigger`, and <Broadcast /> `Broadcast` directly via the
+receiver. Since <Trigger /> `Trigger` and <Broadcast /> `Broadcast` are
+suspend functions, click handlers and other callbacks launch through
+`coroutineScope` — no per-composable `rememberCoroutineScope()` boilerplate.
+The scope is captured once inside `CreateContext`, shared across every
+child extension in that subtree, and cancelled when `CreateContext`
+leaves the composition.
 
-Put a `Node` inside the extension to get both local state and a coroutine
-scope in one step — inside the Node block, `this` is a `NodeScope`, which
-exposes `scope`, `state`, and `update` directly:
+A `Node` inside the extension is still the right move when you also
+want local state and a Node-scoped coroutine — inside the Node block,
+`this` is a `NodeScope`, which exposes its own `scope` (tied to the
+Node's lifetime on `Dispatchers.Main.immediate`), `state`, and `update`:
 
 ```kotlin
 @Composable
@@ -300,9 +307,8 @@ CheckoutContent(
 // Correct — child fires the impulse itself
 @Composable
 fun ContextScope<AppServices>.CheckoutContent(state: CheckoutState) {
-    val scope = rememberCoroutineScope()
     Button(onClick = {
-        scope.launch { Trigger(Checkout.Submit(state.selectedId!!)) } // ✅
+        coroutineScope.launch { Trigger(Checkout.Submit(state.selectedId!!)) } // ✅
     }) { Text("Place Order") }
 }
 ```
