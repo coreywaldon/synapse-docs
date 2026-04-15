@@ -262,7 +262,8 @@ switchBoard.addLoggingInterceptors<AnalyticsEvent> { event ->
 
 It installs six `read` interceptors, one per point, at priorities that
 put upstream logging first and downstream logging last — so you get a
-clean bracket around every pass through the bus.
+clean bracket around every pass through the bus. The call returns a
+single `Registration` that removes all six at once on `unregister()`.
 
 ### Per-consumer filtering at downstream
 

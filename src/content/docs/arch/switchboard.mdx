@@ -84,7 +84,14 @@ nothing.
 |---------|-----------|--------|--------|
 | State | `MutableSharedFlow` | 1 | `DROP_OLDEST` |
 | Reaction | `MutableSharedFlow` | 0 | `extraBufferCapacity = 64`, `DROP_OLDEST` |
-| Request | `SharedFlow` via `ProviderManager` | 1 | — |
+| Request | cold `Flow` wrapping per-job `MutableSharedFlow` in `ProviderManager` | 1 | `extraBufferCapacity = 64` |
+
+`handleRequest` returns a cold `Flow` — each subscriber re-runs upstream
+interception and subscribes to the provider pipeline. Under that, the
+`ProviderManager` deduplicates in-flight work by impulse equality and
+retains the most recent `DataState` via an internal `replay = 1` buffer,
+so a late subscriber that arrives before the underlying job completes
+still observes the latest state.
 
 ### Sharing strategy
 

@@ -68,6 +68,10 @@ loggers first (`Int.MIN_VALUE`) and downstream loggers last
 through the bus for that type, without affecting interceptors on any
 other type.
 
+The call returns a single `Registration` that unregisters all six
+interceptors at once — hold onto it if you need to remove the logger
+later, or ignore the return value for process-lifetime loggers.
+
 Because interception is keyed by `Class.isAssignableFrom`, you can pass
 a marker interface and cover every impulse that implements it:
 

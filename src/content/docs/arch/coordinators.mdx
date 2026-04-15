@@ -214,9 +214,11 @@ order. `onDestroy` additionally calls `dispose()`.
 3. **Clears** the internal registration and lifecycle-callback lists.
 4. **Removes** the lifecycle observer from the `LifecycleOwner`.
 
-It's idempotent — safe to call multiple times — and after it runs, the scope
-is no longer usable. Any attempt to launch new coroutines on a disposed
-scope fails with a `CancellationException`.
+It's idempotent — safe to call multiple times — and after it runs, the
+scope is no longer usable. Coroutines started via `launch` / `async` on a
+disposed scope return immediately in a cancelled state: their bodies do
+not execute past the first suspension point, and the builder itself does
+not throw.
 
 The handler overloads are trivially thin: each one is `launch { flow.collect
 { handler(it) } }` (or `collectLatest` for state), so the returned `Job` is
